@@ -14,10 +14,6 @@ package DBIx::ScaleOut::DBSet;
 use strict;
 use warnings;
 
-use vars qw($VERSION @EXPORT);
-
-$VERSION = ' $Revision: 0.01 $ ' =~ /\$Revision:\s+([^\s]+)/;
-
 #========================================================================
 
 sub new {

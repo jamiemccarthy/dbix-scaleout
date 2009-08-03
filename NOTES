@@ -1,0 +1,35 @@
+DBIx::ScaleOut is kind of a holding class.  It exists mainly so that 'use DBIx::ScaleOut' pulls in the right dependencies and as a place to put db().
+
+
+db() - function, not method. @EXPORTed by DBIx::ScaleOut so there's really no way for a hypothetical subclass of DBIx::ScaleOut to override it. has to work for all projects, all (::Base) classes, all options
+
+	calls startup() if !$Global, and does rudimentary checking of its arguments
+
+	based on its arguments and on , returns a class instance which is ::Base or a subclass
+
+
+startup() - has to work when called by db()
+
+	again, since this is EXPORTed I don't really know a way to have a subclass override.  still, allowing for that possibility, it hardcodes its $class as DBIx::ScaleOut and everything it does is a method, so that may be possible eventually.
+
+	$projinst ||= 'main'
+
+	"stage 0": require's DBIx::ScaleOut::Access::$projinst
+
+	loads constants for the projinst, by connecting to the dbinst of the same name as the projinst
+
+	loads vars for the projinst, by connecting to the dbinst of the same name as the projinst, or the memcached it specifies
+
+	reads dxso_iinstset table, processes it, and stores it in $Global->{projinst}{$projinst}{iinstset}
+
+	does a reroll() to start things off
+
+	when complete, everything is set up -- db() will return a valid DBIx::ScaleOut::Base (from $Global cache, creating and initializing it if necessary)
+
+
+
+projinst is basically a global, stored in $Global->{default_projinst}.  We specifically do not want to pass it in to any methods except as an option to db() which sends it as an option to startup().  I'm pretty sure no ::Base methods should get passed a projinst except new() (when called by db(), typically).
+
+A dbset has to be specific to a projinst because different projects can have dbinsts with the same names. so we store a dbset in $Global->{projinst}{$projinst}{dbset}.
+
+

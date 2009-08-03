@@ -8,7 +8,7 @@ use Data::Dumper;
 
 use fields qw( prompt_callback only_return );
 
-use constant SETUPFILENAME => '_setupfile.txt';
+use constant SETUPFILENAME => '_setupfile.pm';
 
 sub new {
 	my($class, $init) = @_;
@@ -61,8 +61,8 @@ sub do_edit {
 	my $setupfile_text = $self->get_setupfile_text();
 
 	my $first_time_thru = 1;
-	my @dbinsts = ( );
-	while (!@dbinsts) {
+	my $dbinst_hr = ( );
+	while (!%$dbinst_hr) {
 		my $editor = '';
 		while (!$editor) {
 			if ($first_time_thru) {
@@ -78,27 +78,28 @@ sub do_edit {
 		}
 		$setupfile_text = $self->get_edited_text($setupfile_text, $editor);
 		my $err_ar;
-		($err_ar, @dbinsts) = $self->parse_setupfile_text($setupfile_text);
+		($dbinst_hr, $err_ar) = $self->parse_setupfile_text($setupfile_text);
 		if (!@$err_ar) {
-			$err_ar = $self->check_dbinsts(@dbinsts);
+			$err_ar = $self->check_dbinsts($dbinst_hr);
 		}
 		if (@$err_ar) {
-			@dbinsts = ( );
+			$dbinst_hr = { };
 			$self->print_err($err_ar);
 			print $retry_text;
 		}
 	}
-use Data::Dumper; print STDERR "do_edit dbinsts: " . Dumper(\@dbinsts);
-	return($setupfile_text, \@dbinsts);
+use Data::Dumper; print STDERR "do_edit dbinst_hr: " . Dumper($dbinst_hr);
+	return($setupfile_text, $dbinst_hr);
 }
 
 sub write_files {
 	my($text, $dbinst_ar) = @_;
 	my $dir = get_setup_dir();
 	
-		# Emit $setupfile_text to $INC{DBIx/ScaleOut/Setup/something.pm}
+		# Emit $setupfile_text to $INC{DBIx/ScaleOut/Setup/_setupfile.pm}
 		# (some scalar to Dumper dump the data)
-		# Emit @dbinsts to $INC{DBIx/ScaleOut/Setup/$dbinst.pm}.
+		# Emit $dbinst_hr to $INC{DBIx/ScaleOut/Access/$dbinst.pm}.
+		# (it has to define dbinsts() which returns a hashref of dbinsts)
 		# Its $dbinsts arrayref contains the data.
 		# Don't forget to insert a comment as first line
 	# put together a {dsn} field for each dbinst
@@ -191,8 +192,9 @@ sub get_setupfile_text_default {
 # the dbinst.  This is the string you'll use in your code to
 # identify which database you want to access.  It must be a single
 # short word (must match /^[A-Za-z]\\w{0,11}\\$/, and by convention
-# these names are lowercase).
-dbinst=
+# these names are lowercase).  The default default is "main" so
+# it's most convenient if you have that one, at least, defined.
+dbinst=main
 # The config file for this dbinst will provide full database
 # access to any unix user that can read it.  Authorization and
 # security thus depend on your setting up unix permissions.
@@ -216,7 +218,7 @@ port=
 # look like e.g. /var/run/mysqld5.0/mysql.sock.
 socket=
 # This is the username your client will log into the DB with.
-dbuser=root
+dbuser=
 # And the password (or blank for none).  Everything between the /=\\s*/
 # and /\\n/ is the password, so no need to quote special characters.
 # (There's no way to have a newline or any leading whitespace in your
@@ -231,6 +233,11 @@ database=
 constantstable=
 # Attributes go here, "k1=v1 k2=v2", but you won't usually have any.
 attributes=
+# The initial dbinst is the one that DBIx::ScaleOut connects to,
+# to obtain some information necessary to initialize itself.
+# Typically this would be your "main" writer DB.  Don't define more
+# than one dbinst as initial.
+initial=1
 
 ##############################
 # To create additional dbinsts, simply copy and paste the above
@@ -247,13 +254,6 @@ attributes=
 # directory somewhere in your @INC.  Once DBIx::ScaleOut is installed,
 # you can re-edit this file at any time, and `perldoc DBIx::ScaleOut` will
 # have information on doing that.
-#
-# Whichever dbinst you put first is the one that DBIx::ScaleOut will
-# initially connect to, to retrieve additional data during initialization.
-# (XXX how to handle failover? maybe a 'connectorder' field instead?)
-# (a field in a dbinst lets us keep the data flat, otherwise we have to
-# have a separate 'dbinst connect try order' field and put the dbinsts
-# into an arrayref field)
 ##############################
 EOF
 }
@@ -307,8 +307,8 @@ sub parse_setupfile_text {
 	}
 	push @$err_ar, 'No tuples' if !@tuples;
 	return $err_ar if @$err_ar;
-	($err_ar, @dbinsts) = $self->group_tuples(@tuples);
-	return($err_ar, @dbinsts);
+	($dbinst_hr, $err_ar) = $self->group_tuples(@tuples);
+	return($dbinst_hr, $err_ar);
 }
 
 sub group_tuples {
@@ -328,15 +328,17 @@ sub group_tuples {
 		database	=> {	regex =>	qr{.}			},
 		constantstable	=> {	regex =>	qr{^[a-z]\w{0,31}$}	},
 		attributes	=> {	regex =>	qr{.?}			},
-		# if we do a connectorder, check it here
+		initial		=> {	regex =>	qr{^[01]?$}		},
+		# XXX we probably want some kind of failover, to go to successive
+		# dbinsts on startup if the initial is down
 	);
 	my @fields = keys %field;
 
 	my $err_ar = [ ];
-	# Verify that every field present is known, every field known
-	# is present, and every present field is valid.
-	my @dbinsts = ( );
-	my $cur_user = { };
+	# Verify that every field present is known,
+	# and every present field is valid.
+	my %dbinst = ( );
+	my $cur_dbinst = { };
 	for my $kv (@tuples) {
 		my($key, $value) = @$kv;
 		if (!$field{$key}) {
@@ -348,43 +350,58 @@ sub group_tuples {
 			next;
 		}
 		if ($key eq 'dbinst') {
-			# New user.  If we had an old user, push it onto
-			# the list.
-			if (%$cur_user) {
-				push @dbinsts, $cur_user;
-				$cur_user = { };
+			# New dbinst.  If we had an old dbinst, store it
+			# in the list.
+			if (%$cur_dbinst) {
+				$dbinst{$value} = $cur_dbinst;
+				$cur_dbinst = { };
 			}
 		}
-		$cur_user->{$key} = $value;
+		$cur_dbinst->{$key} = $value;
 	}
-	push @dbinsts, $cur_user if %$cur_user;
-	for my $u (@dbinst) {
-		my @missing = sort grep { !exists $u->{$_} } @fields;
+	$dbinst{$value} = $cur_dbinst if %$cur_dbinst;
+	# Verify every field known is present.
+	for my $dbinst_name (keys %dbinst) {
+		my $dbinst = $dbinst{$dbinst_name};
+		my @missing = sort
+			grep { $_ ne 'initial' } # it's OK to omit the 'initial' field
+			grep { !exists $dbinst->{$_} } @fields;
 		if (@missing) {
 			push @$err_ar, "dbinst '$dbinst' missing fields: '@missing'";
 		}
 	}
-	@dbinsts = ( ) if @$err_ar;
-	return($err_ar, @dbinsts);
+	# Verify exactly one dbinst has 'initial' set.
+	my @initials = ( );
+	for my $dbinst_name (sort keys %dbinst) {
+		for my $field (keys $dbinst{$dbinst_name}) {
+			push @initials, $dbinst_name if $field eq 'initial';
+		}
+	}
+	if (scalar(@initials) != 1) {
+		push @$err_ar, "more than one dbinst marked as initial: '@initials'";
+	}
+	%dbinst = ( ) if @$err_ar;
+	return(\%dbinst, $err_ar);
 }
 
 sub check_dbinsts {
-	my($self, @dbinsts) = @_;
+	my($self, $dbinst_hr) = @_;
 	my $err_ar = [ ];
-	for my $u (@dbinsts) {
+	for my $dbinst_name (keys %$dbinst_hr) {
+		my $dbinst = $dbinst_hr->{$dbinst_name};
 		my $dbh;
-		if (!$self->check_host_ping($u)) {
-			push @$err_ar, "cannot ICMP ping $u->{host}";
-		} elsif (!$self->check_tcp_socket_connect($u)) {
-			push @$err_ar, "cannot open TCP connection to $u->{host}:$u->{port}";
-		} elsif (!$self->check_unix_socket_connect($u)) {
-			push @$err_ar, "cannot connect to unix socket at $u->{socket}";
-		} elsif (!($dbh = $self->check_db_connect($u))) {
-			push @$err_ar, "cannot connect to db and DBI->ping for dbinst $u->{dbinst}, reported error: '" . $DBI::errstr . "'";
+		if (!$self->check_host_ping($dbinst)) {
+			push @$err_ar, "cannot ICMP ping $dbinst->{host}";
+		} elsif (!$self->check_tcp_socket_connect($dbinst)) {
+			push @$err_ar, "cannot open TCP connection to $dbinst->{host}:$dbinst->{port}";
+		} elsif (!$self->check_unix_socket_connect($dbinst)) {
+			push @$err_ar, "cannot connect to unix socket at $dbinst->{socket}";
+		} elsif (!($dbh = $self->check_db_connect($dbinst))) {
+			push @$err_ar, "cannot connect to db and DBI->ping for dbinst $dbinst->{dbinst}, reported error: '" . $DBI::errstr . "'";
 		} else {
 			my($ok, $errstr) = $self->check_db_select($dbh);
 			if (!$ok) {
-				push @$err_ar, "cannot perform SELECT for dbinst $u->{dbinst}, reported error: '$errstr'";
+				push @$err_ar, "cannot perform SELECT for dbinst $dbinst->{dbinst}, reported error: '$errstr'";
 			}
 		}
 	}
@@ -392,16 +409,16 @@ sub check_dbinsts {
 }
 
 sub check_host_ping {
-	my($self, $u) = @_;
-	my $host = $u->{host};
+	my($self, $dbinst) = @_;
+	my $host = $dbinst->{host};
 	my $p = Net::Ping->new();
 	return $p->ping($host);
 }
 
 sub check_tcp_socket_connect {
-	my($self, $u) = @_;
-	my($host, $port) = ($u->{host}, $u->{port});
-	return 1 if !$host && $u->{socket}; # if using unix sockets, skip this test
+	my($self, $dbinst) = @_;
+	my($host, $port) = ($dbinst->{host}, $dbinst->{port});
+	return 1 if !$host && $dbinst->{socket}; # if using unix sockets, skip this test
 	# XXX default port to the driver default here
 	my $p = Net::Ping->new("tcp"); # default timeout 5 seconds
 	$p->{port_num} = $port;
@@ -410,22 +427,22 @@ sub check_tcp_socket_connect {
 }
 
 sub check_unix_socket_connect {
-	my($self, $u) = @_;
-	my($socket) = ($u->{socket});
-	return 1 if !$socket && $u->{host}; # if using tcp sockets, skip this test
+	my($self, $dbinst) = @_;
+	my($socket) = ($dbinst->{socket});
+	return 1 if !$socket && $dbinst->{host}; # if using tcp sockets, skip this test
 	# XXX write test here
 	return 1;
 }
 
 sub check_db_connect {
-	my($self, $u) = @_;
+	my($self, $dbinst) = @_;
 	# obviously building this string should be a function in DBIx::ScaleOut itself
-	my $connect_string = "DBI:$u->{driver}:database=$u->{database};host=$u->{hostname}";
-	$connect_string .= ";port=$u->{port}" if $u->{port};
-	my $attr = { ( map { ($1, $2) } grep { /^([^=]+)=(.*)$/ } split / /, $u->{attributes} ) };
-print STDERR "calling DBI->connect '$connect_string' $u->{dbuser}, $u->{password}, $u->{attributes} attr: " . Dumper($attr);
+	my $connect_string = "DBI:$dbinst->{driver}:database=$dbinst->{database};host=$dbinst->{hostname}";
+	$connect_string .= ";port=$dbinst->{port}" if $dbinst->{port};
+	my $attr = { ( map { ($1, $2) } grep { /^([^=]+)=(.*)$/ } split / /, $dbinst->{attributes} ) };
+print STDERR "calling DBI->connect '$connect_string' $dbinst->{dbuser}, $dbinst->{password}, $dbinst->{attributes} attr: " . Dumper($attr);
 	my $dbh = DBI->connect($connect_string,
-		$u->{dbuser}, $u->{password}, $attr);
+		$dbinst->{dbuser}, $dbinst->{password}, $attr);
 	return '' if !$dbh;
 	return $dbh->ping ? $dbh : '';
 }
@@ -435,7 +452,7 @@ sub check_db_select {
 	my($ok, $errstr) = ('', '(unknown error)');
 	if (!$dbh) {
 		$errstr = $DBI::errstr;
-	} elsif ($u->{driver} eq 'mysql') { # no, test $dbh->{Driver} ... -> something?
+	} elsif ($dbinst->{driver} eq 'mysql') { # no, test $dbh->{Driver} ... -> something?
 		# dbs besides mysql are going to have different ways to do this, right?
 		# maybe we need a DBIx::ScaleOut::Driver::$foo::check_select() method
 print STDERR "calling do SELECT\n";

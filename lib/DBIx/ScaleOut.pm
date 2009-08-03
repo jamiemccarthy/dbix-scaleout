@@ -13,18 +13,16 @@ use warnings;
 # The most notable one is DBIx::ScaleOut::Base, which is the base class
 # which your application's db classes will subclass.
 
+use base 'Exporter';
 use DBI;
 use Storable;
 use Cache::Memory;
 use Cache::Memcached;
-use DBIx::ScaleOut::Base;
 
-use vars qw( @EXPORT $Global );
-@EXPORT = qw(
+use vars qw( $Global );
+our @EXPORT = qw(
 	db
 	dat
-	startup
-	reroll
 );
 
 our($VERSION) = ' $Revision: 0.01 $ ' =~ /\$Revision:\s+([^\s]+)/;
@@ -35,6 +33,9 @@ our($VERSION) = ' $Revision: 0.01 $ ' =~ /\$Revision:\s+([^\s]+)/;
 # startup time, and to persist through Apache child forks.
 our $Global = undef;
 
+# Subclassing DBIx::ScaleOut to override this doesn't work unless
+# you call YourClass->new() ???  To set something in $Global?  I dunno
+# XXX figure out how to allow custom ::ScaleOut subclasses
 sub default_projinst	{ 'main' }
 
 #========================================================================
@@ -43,15 +44,21 @@ sub default_projinst	{ 'main' }
 # is already initialized properly
 
 sub db {
-	my($class, $shard, $purpose) = @_;
-	startup() if !$Global;
-	$class   ||= dat('dxso_classdefault') || 'DBIx::ScaleOut::Base';
-	$shard   ||= $class->default_shard;
-	$purpose ||= $class->default_purpose;
+	my($class, $options) = @_;
 
-	$Global->{db_classinst_cache}{$class}{$shard}{$purpose}
-		||= $class->create($shard, $purpose);
-	return $Global->{db_classinst_cache}{$class}{$shard}{$purpose};
+	startup(default_projinst()) if !$Global;
+
+	$class ||= dat('dxso_classdefault') || 'DBIx::ScaleOut::Base';
+	die "invalid class '$class' in db()" unless $class->isa('DBIx::ScaleOut::Base');
+
+	my $shard = $options->{shard} || $class->default_shard;
+
+	my $purpose = $options->{purpose} || $class->default_purpose;
+	die "invalid purpose '$purpose' in db()" unless $purpose =~ /^[rw]$/;
+
+	return
+		$Global->{db_classinst_cache}{$class}{$shard}{$purpose}
+			||= $class->create($shard, $purpose);
 }
 
 sub dat {
@@ -60,6 +67,10 @@ sub dat {
 }
 
 # startup:
+#
+# Intended to be called at e.g. Apache startup time (pre-fork) but
+# for lazy programmers should work (just slower) when not called
+# at all until db() is called.
 #
 # 'require' some modules that this project will need and initialize
 # the global variable.
@@ -70,14 +81,23 @@ sub dat {
 # - read vars table
 # - ping each defined dbinst except the writer and emit a warning
 #   (not error, at this stage) for any failure.
+#
+# I really would (eventually) like a way to allow multiple projinst's
+# but for now -- stage0 sets {default_projinst} and everything else
+# just uses that.
 
 sub startup {
-	my($class, $projinst) = @_;
+	my($projinst) = @_;
 	$projinst ||= default_projinst();
 
+	my $class = 'DBIx::ScaleOut'; # XXX figure out how to allow custom ::ScaleOut subclasses
 	$class->startup_stage0($projinst);
 	$class->startup_stage1();
 	$class->startup_ready();
+}
+
+sub reroll {
+	$Global->{rollcount}++;
 }
 
 # stage0: require perl modules and create stub $Global
@@ -85,9 +105,10 @@ sub startup {
 sub startup_stage0 {
 	my($class, $projinst) = @_;
 
-	my $setup_class = "DBIx::ScaleOut::Setup::$projinst";
+	my $setup_class = "DBIx::ScaleOut::Access::$projinst";
 	require $setup_class; # If this dies, nothing is going to work anyway
-	my $dbinsts_ar = \@{$setup_class->dbinsts}; # probable parse error
+	my $dbinsts_hr = $setup_class->dbinsts;
+	my $initial = (grep { $dbinsts_hr->{$_}{initial} } keys %$dbinsts_hr)[0];
 	my $driver = $setup_class->{driver} || die "no driver defined in '$projinst'";
 	if (!grep { $_ eq $driver } DBI->available_drivers) { die "driver '$driver' not installed" }
 	my $driver_class = "DBIx::ScaleOut::Driver::$driver";
@@ -95,9 +116,10 @@ sub startup_stage0 {
 
 	$Global = {
 		rollcount	=> 0,
-		projinst	=> $projinst,
-		driver_class	=> $driver_class,
-		dbinsts		=> $dbinsts_ar,
+		believed_pid	=> $$,
+		default_projinst => $projinst,
+		dbinst		=> $dbinsts_hr,
+		initial_dbinst	=> $initial,
 	};
 }
 
@@ -112,31 +134,33 @@ sub startup_stage0 {
 sub startup_stage1 {
 	my($class) = @_;
 
-	my $projinst = $Global->{projinst};
-	# when we enable multiple connection attempts via connectorder (in case the first choice
-	# writer db is down), the params should be a list and the connection
-	# attempt should be in a loop
-	my $params = $Global->{dbinsts}[0];
+	my $projinst = $Global->{default_projinst};
+	my $gp = $Global->{projinst}{$projinst};
+	# when we enable multiple connection attempts with a connectorder
+	# (in case the first choice writer db is down), the params should
+	# be a list and the connection attempt should be in a loop
+	my $initial_dbinst = $gp->{dbinst}{ $gp->{initial_dbinst} };
 
-	my $mainwriter_dbh = $class->startup_stage1_connect($params);
-	die "startup_stage1 cannot connect" if !$mainwriter_dbh;
-	$class->startup_stage1_digestconstantstable($mainwriter_dbh);
-	my $raw_constants = $class->startup_stage1_readconstants($mainwriter_dbh);
-	$class->startup_stage1_setconstants($raw_constants);
+	my $initial_dbh = $class->startup_stage1_connect($initial_dbinst);
+	die "startup_stage1 cannot connect" if !$initial_dbh;
+	$class->startup_stage1_digestconstantstable($initial_dbinst, $initial_dbh);
+	my $raw_constants = $class->startup_stage1_readconstants($initial_dbh);
+	$class->startup_stage1_setconstants($initial_dbinst, $raw_constants);
 
-	$class->startup_stage1_digestvariablestable($mainwriter_dbh);
-	my $raw_variables = $class->startup_stage1_readvariables($mainwriter_dbh);
+	$class->startup_stage1_digestvariablestable($initial_dbh);
+	my $raw_variables = $class->startup_stage1_readvariables($initial_dbh);
 	$class->startup_stage1_setvariabledefaults($raw_variables);
 	$class->startup_stage1_setdat($raw_variables);
 
 	$class->startup_stage1_classinst();
-	$class->startup_stage1_pingdbinsts() if $Global->{dat}{dxso_startup_ping_all_dbinsts};
+	$class->startup_stage1_dbset();
 
 	$class->startup_stage1_memcached();
 	$class->startup_stage1_localcache();
 }
 
 # startup_ready: make any final changes to allow rest of methods to be called
+# (not a bad place for subclasses to want to override)
 
 sub startup_ready {
 	my($class) = @_;
@@ -145,19 +169,24 @@ sub startup_ready {
 }
 
 sub startup_stage1_connect {
-	my($class) = @_;
-	my $params = $Global->{dbinsts}[0];
-	return DBI->connect_cached($params->{dsn}, $params->{dbuser}, $params->{password});
+	my($class, $dbinst) = @_;
+	return DBI->connect_cached($dbinst->{dsn}, $dbinst->{dbuser}, $dbinst->{password});
 }
 
 sub startup_stage1_digestconstantstable {
-	my($class, $dbh) = @_;
-	my $params = $Global->{dbinsts}[0];
-	my $driver_class = $Global->{driver_class};
-	my $table_name = $params->{constantstable};
+	my($class, $dbinst, $dbh) = @_;
+	my $table_name = $dbinst->{constantstable};
+	$class->startup_stage1_digesttable($dbh, $table_name);
+}
+
+sub startup_stage1_digesttable {
+	my($class, $dbh, $table_name) = @_;
+	my $projinst = $Global->{default_projinst};
+	my $gp = $Global->{projinst}{$projinst};
+	my $driver_class = $gp->{driver_class};
 	my $dtd = $driver_class->get_dtd($dbh, $table_name);
 	my $digest = $class->digest_dtd($dtd);
-	$Global->{digest}{$table_name} = $digest;
+	$gp->{digest}{$table_name} = $digest;
 }
 
 sub digest_dtd {
@@ -169,11 +198,12 @@ sub digest_dtd {
 }
 
 sub startup_stage1_readconstants {
-	my($class, $dbh) = @_;
-	my $params = $Global->{dbinsts}[0];
-	my $table_name = $params->{constantstable};
-	my $keycol = $Global->{digest}{$table_name}{keycol};
-	my $valcol = $Global->{digest}{$table_name}{valcol};
+	my($class, $dbinst, $dbh) = @_;
+	my $table_name = $dbinst->{constantstable};
+	my $projinst = $Global->{default_projinst};
+	my $gp = $Global->{projinst}{$projinst};
+	my $keycol = $gp->{digest}{$table_name}{keycol};
+	my $valcol = $gp->{digest}{$table_name}{valcol};
 	my $raw_constants = $dbh->selectall_hashref(
 		"SELECT $keycol, $valcol FROM $table_name",
 		$keycol);
@@ -181,31 +211,32 @@ sub startup_stage1_readconstants {
 }
 
 sub startup_stage1_setconstants {
-	my($class, $c) = @_;
-	my $params = $Global->{dbinsts}[0];
+	my($class, $dbinst, $c) = @_;
+	my $projinst = $Global->{default_projinst};
+	my $gp = $Global->{projinst}{$projinst};
 	$c->{dxso_classdefault} ||= 'DBIx::ScaleOut::Base';
 	# there can't be a constant (or var) overriding the name
 	# of the constants table (for obvious reasons)
-	$c->{dxso_constantstable} = $params->{constantstable};
+	$c->{dxso_constantstable} = $dbinst->{constantstable};
 	$c->{dxso_variablestable} ||= 'dxso_variables';
+	$c->{dxso_iinstsettable} ||= 'dxso_iinstset';
 	# and set other defaults
-	$Global->{constants} = \%$c;
+	$gp->{constants} = \%$c;
 }
 
 sub startup_stage1_digestvariablestable {
 	my($class, $dbh) = @_;
-	my $driver_class = $Global->{driver_class};
-	my $table_name = $Global->{constants}{dxso_variables};
-	my $dtd = $driver_class->get_dtd($dbh, $table_name);
-	my $digest = $class->digest_dtd($dtd);
-	$Global->{digest}{$table_name} = $digest;
+	my $table_name = $gp->{constants}{dxso_variablestable};
+	$class->startup_stage1_digesttable($dbh, $table_name);
 }
 
 sub startup_stage1_readvariables {
 	my($class, $dbh) = @_;
-	my $table_name = $Global->{constants}{dxso_variables};
-	my $keycol = $Global->{digest}{$table_name}{keycol};
-	my $valcol = $Global->{digest}{$table_name}{valcol};
+	my $projinst = $Global->{default_projinst};
+	my $gp = $Global->{projinst}{$projinst};
+	my $table_name = $gp->{constants}{dxso_variables};
+	my $keycol = $gp->{digest}{$table_name}{keycol};
+	my $valcol = $gp->{digest}{$table_name}{valcol};
 	my $raw_variables = $dbh->selectall_hashref(
 		"SELECT $keycol, $valcol FROM $table_name",
 		$keycol);
@@ -227,7 +258,9 @@ sub startup_stage1_setvariabledefaults {
 
 sub startup_stage1_setdat {
 	my($class, $raw_variables) = @_;
-	my $constants = $Global->{constants};
+	my $projinst = $Global->{default_projinst};
+	my $gp = $Global->{projinst}{$projinst};
+	my $constants = $gp->{constants};
 	my $v = \%$constants;
 	for my $key (keys %$raw_variables) {
 		# Data pulled from constants used to get this far
@@ -240,26 +273,32 @@ sub startup_stage1_setdat {
 	# here -- store the expiration time, determine expiration time
 	# by the dat 'dxso_dat_expiretime', write to memcached if
 	# available
-	$Global->{dat} = $v;
+	$gp->{dat} = $v;
 }
 
 sub startup_stage1_classinst {
 	$Global->{db_classinst_cache} = { };
 	# Retrieve the iinstset.
-	my $iinstset_tablename = $constants->{iinstset_tablename}; # default is 'dxso_iinstset'
+	my $projinst = $Global->{default_projinst};
+	my $gp = $Global->{projinst}{$projinst};
+	my $constants = $gp->{constants};
+	my $iinstset_tablename = $constants->{dxso_iinstsettable};
 	my $iinstset_raw =
 		$dbh->selectall_arrayref(
 			"SELECT * FROM $iinstset_tablename WHERE projinst=" . $dbh->quote($projinst),
 			{ Slice => {} })
 		|| [ ];
 	my $iinstset = process_raw_iinstset($projinst, $iinstset_raw);
-	$global->{projinst}{$projinst}{iinstset} = $iinstset;
+	$gp->{iinstset} = $iinstset;
 
 }
 
-sub startup_stage1_pingdbinsts {
+sub startup_stage1_dbset {
 	my($class) = @_;
-	# ping all defined dbinst's, warn() on any failures
+	my $do_ping = $Global->{dat}{dxso_startup_ping_all_dbinsts};
+	# make a DBSet and store it somewhere appropriate
+	my $projinst = $Global->{default_projinst};
+	my $dbset = DBIx::ScaleOut::DBSet->new($
 }
 
 sub startup_stage1_memcached {
@@ -303,11 +342,6 @@ sub startup_stage1_cachememory {
 		$cachememory = '';
 	}
 	$Global->{cache}{memory} = $cachememory;
-}
-
-sub reroll {
-	my($class) = @_;
-	$Global->{rollcount}++;
 }
 
 sub cache_get {
@@ -407,7 +441,7 @@ sub getConstants {
   use DBIx::ScaleOut 'myprojinst';
 
   $rows = db()->insert('table1', { id => 3, -timecol => 'NOW()' });
-  $hr = db()->selectHashref('timecol', 'table1', "id=" . $db->quote($id));
+  $timecol = db()->selectOne('timecol', 'table1', "id=" . $db->quote($id));
   my $db = db();
   $success = $db->set('user', $uid, { bio => $bio });
   $hr = $db->get('user', $uid);
@@ -417,15 +451,25 @@ classes can inherit;  it defines insert(), set(), etc.  A constant
 in dxso_constants specifies which base class to use, and you can
 set it to your subclass or use the default 'DBIx::ScaleOut::Base'.
 
-db() returns a ::Base.
+db() is often called without arguments and returns the object for
+your project's default ::Base class.  Another common invocation
+is db('My::Class') which returns the object for that subclass of ::Base.
 
-A ::Base has-a DBSet and uses DBSet's logic to pick a dbinst.
+There is exactly one object created for each ::Base subclass.  Each
+such object has-a DBSet object whose primary job is to pick a dbinst.
 
 projinst:	default default 'main'
 shard:		default class's default 'main'
 purpose:	default class's default 'w'
 gen:		generation
 weight:		weight within the generation
+
+db()
+	function, not method
+	calls startup() if !$Global
+	
+startup()
+	
 
 Examples:
 
@@ -493,9 +537,6 @@ If you want to open multiple dbh's to the same dbinst, this will
 have to be done manually, by calling connect_nocache_dbinst.  If you
 think you need to do this, check whether you can make do with multiple
 sth's.  In fact most of the time you don't even need that.
-
-Hmmm should $global->{default}{projinst} be $global->{default_projinst}?
-I don't know if we're going to have any other global defaults.
 
 It'd be nice to have a method that means "set the default reader purpose
 for shard s to 'foo' until the next reroll", so e.g. admin pages could
@@ -585,40 +626,6 @@ connect_nocache_dbinst($dbinst) - function
 
 =cut
 
-sub new {
-	# This would go to DBIx::ScaleOut::DB
-	my($class, $projinst, $shard, $purpose, $opts) = @_;
-
-	die "createDB() has not been called"
-		if !$global;
-	die "createDB() has not been called for projinst '$projinst'"
-		if !$global->{projinst}{$projinst};
-
-	# If a projinst isn't specified, default to the current projinst.
-	$projinst ||= $global->{default}{projinst};
-	$shard    ||= default_shard();
-	$purpose  ||= default_purpose();
-	$opts ||= { };
-
-	# Set up the new object we'll be returning.  Don't try to connect
-	# to anything yet;  see getDB().
-	my $self = bless {
-		projinst	=> $projinst,
-		shard		=> $shard,
-		purpose		=> $purpose,
-		opts		=> $opts,
-		rollcount	=> 0,
-		w_inst		=> '',
-		w_dbh		=> undef,
-		r_inst		=> '',
-		r_dbh		=> undef,
-	}, $class;
-
-	# Don't try yet to open any connections;  they'll be opened as
-	# necessary.  So new() always succeeds.
-	return $self;
-}
-
 sub init_class_global {
 	if (!defined $global) {
 		if ($ENV{GATEWAY_INTERFACE} && (my $r = Apache->request)) {
@@ -656,40 +663,40 @@ sub get_constants {
 # caching is done.  "readonly" may be a common enough opt that we
 # don't want to re-new() for each one.
 
-sub db {
-	my($class, $shard, $purpose, $opts) = @_;
-	
-	die "createDB() has not been called"
-		if !$global;
-	$class   ||= 'DBIx::ScaleOut::Base';
-	$shard   ||= $class->default_shard();
-	$purpose ||= $class->default_purpose();
-
-	# opts is the only way to specify a separate project (it would
-	# be rare, which is why it's buried in opts).  If that is the
-	# only opt given, forget about the hashref so the resulting
-	# object may be cached normally.
-	my $projinst;
-	if ($opts && $opts->{projinst}) {
-		$projinst = $opts->{projinst};
-		$opts = undef if !%$opts;
-	}
-	$projinst ||= $global->{default}{projinst};
-
-	my $key = join('-', $class, $shard, $purpose);
-	if (!$opts &&  $global->{projinst}{$projinst}{dbobjcache}{$key}) {
-		return $global->{projinst}{$projinst}{dbobjcache}{$key};
-	}
-	my $self = $class->new($projinst, $shard, $purpose, $opts);
-	return undef if !$self;
-	my $dbset = $self->get_dbset();
-	$global->{dbobjcache}{$key} = $self if !$opts;
-	# Note, if $opts is true, $self needs to go into dbobjcache somewhere
-	# so that it can be reroll()'d... and if $opts includes 'nocache',
-	# reroll() needs to purge it from the cache so its memory and
-	# connection handle can be reclaimed.
-	return $self;
-}
+#sub db {
+#	my($class, $shard, $purpose, $opts) = @_;
+#	
+#	die "createDB() has not been called"
+#		if !$global;
+#	$class   ||= 'DBIx::ScaleOut::Base';
+#	$shard   ||= $class->default_shard();
+#	$purpose ||= $class->default_purpose();
+#
+#	# opts is the only way to specify a separate project (it would
+#	# be rare, which is why it's buried in opts).  If that is the
+#	# only opt given, forget about the hashref so the resulting
+#	# object may be cached normally.
+#	my $projinst;
+#	if ($opts && $opts->{projinst}) {
+#		$projinst = $opts->{projinst};
+#		$opts = undef if !%$opts;
+#	}
+#	$projinst ||= $global->{default_projinst};
+#
+#	my $key = join('-', $class, $shard, $purpose);
+#	if (!$opts &&  $global->{projinst}{$projinst}{dbobjcache}{$key}) {
+#		return $global->{projinst}{$projinst}{dbobjcache}{$key};
+#	}
+#	my $self = $class->new($projinst, $shard, $purpose, $opts);
+#	return undef if !$self;
+#	my $dbset = $self->get_dbset();
+#	$global->{dbobjcache}{$key} = $self if !$opts;
+#	# Note, if $opts is true, $self needs to go into dbobjcache somewhere
+#	# so that it can be reroll()'d... and if $opts includes 'nocache',
+#	# reroll() needs to purge it from the cache so its memory and
+#	# connection handle can be reclaimed.
+#	return $self;
+#}
 
 # This serves several purposes:
 # It ends any open transaction (probably ROLLBACK and warn);
@@ -714,7 +721,7 @@ sub db {
 
 sub reroll {
 	my($class, $projinst) = @_;
-	$projinst ||= $global->{default}{projinst};
+	$projinst ||= $global->{default_projinst};
 	my $dbobjcache = $global->{projinst}{$projinst}{dbobjcache};
 	for my $key (sort keys %$dbobjcache) {
 		$dbobjcache->{$key}->check_rollback();
@@ -733,6 +740,8 @@ sub check_rollback {
 			. " in project $self->{projinst}, dbinst $self->{w_inst}";
 	}
 }
+
+# Obsolete. Mine this for good ideas then delete.
 
 sub createDB {
 	my($projinst, $not_default) = @_;
@@ -793,7 +802,7 @@ sub createDB {
 
 	$global->{projinst}{$projinst}{rollcount} = 1;
 
-	$global->{default}{projinst} = $projinst unless $not_default;
+	$global->{default_projinst} = $projinst unless $not_default;
 }
 
 sub process_raw_constants {
