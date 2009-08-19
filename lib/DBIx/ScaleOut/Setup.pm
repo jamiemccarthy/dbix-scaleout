@@ -2,6 +2,8 @@ package DBIx::ScaleOut::Setup;
 
 #use DBIx::ScaleOut;
 use DBI;
+use Fcntl qw( F_SETFD F_GETFD );
+use File::Temp qw( :seekable );
 use File::Spec;
 use Net::Ping;
 use Data::Dumper;
@@ -61,7 +63,7 @@ sub do_edit {
 	my $setupfile_text = $self->get_setupfile_text();
 
 	my $first_time_thru = 1;
-	my $dbinst_hr = ( );
+	my $dbinst_hr = { };
 	while (!%$dbinst_hr) {
 		my $editor = '';
 		while (!$editor) {
@@ -191,7 +193,7 @@ sub get_setupfile_text_default {
 # The first line in each dbinst declaration must be the name of
 # the dbinst.  This is the string you'll use in your code to
 # identify which database you want to access.  It must be a single
-# short word (must match /^[A-Za-z]\\w{0,11}\\$/, and by convention
+# short word (must match /^[A-Za-z]\\w{0,11}\\\$/, and by convention
 # these names are lowercase).  The default default is "main" so
 # it's most convenient if you have that one, at least, defined.
 dbinst=main
@@ -204,7 +206,7 @@ dbinst=main
 unixuser=$root_user
 unixgroup=$root_group
 # Currently the only driver supported is 'mysql'.  (Planning on
-# supporting more...)
+# supporting drizzle and postgres eventually.)
 driver=mysql
 # Identify the host machine the database is on, preferably by IP
 # number (IP name may be more convenient but is slightly less
@@ -221,17 +223,20 @@ socket=
 dbuser=
 # And the password (or blank for none).  Everything between the /=\\s*/
 # and /\\n/ is the password, so no need to quote special characters.
-# (There's no way to have a newline or any leading whitespace in your
-# password.)
+# Thus, there's no way to have a newline or any leading whitespace in
+# your password.  The password will be stored as plaintext:  there's
+# no real way around this.  Storing this password effectively punts
+# database authentication down from mysqld to unix, so if you have
+# concerns, make sure your unixuser/unixgroup above are correct.
 password=
 # The name of the database you'll be accessing.
 database=
 # The name of the constants table in that database, which stores
 # values that are necessary for the initial stages of setup and
-# which rarely change.  Default is 'dxso_constants'.  (If this
-# table is not present, of course, defaults will be used instead.)
+# which rarely change.  Default is 'dxso_constants'.  (If at runtime
+# this table is not present, defaults will be used instead.)
 constantstable=
-# Attributes go here, "k1=v1 k2=v2", but you won't usually have any.
+# DBI attributes go here, "k1=v1 k2=v2", but you won't usually have any.
 attributes=
 # The initial dbinst is the one that DBIx::ScaleOut connects to,
 # to obtain some information necessary to initialize itself.
@@ -251,7 +256,7 @@ initial=1
 # connection errors, and give you the opportunity to re-edit it
 # as many times as you want.  When you're done, DBIx::ScaleOut::Setup will
 # save the parsed data from this file into a DBIx/ScaleOut/Setup/
-# directory somewhere in your @INC.  Once DBIx::ScaleOut is installed,
+# directory somewhere in your \@INC.  Once DBIx::ScaleOut is installed,
 # you can re-edit this file at any time, and `perldoc DBIx::ScaleOut` will
 # have information on doing that.
 ##############################
@@ -267,16 +272,21 @@ sub get_setup_dir {
 
 sub get_edited_text {
 	my($self, $text, $editor) = @_;
-	my $tmp = new File::Temp(UNLINK => 1, SUFFIX => '.txt');
-	print $tmp $text;
-	system $editor, $tmp;
-	seek($tmp, 0, 0);
+	File::Temp->safe_level(File::Temp::HIGH);
+	my $tmpfh = new File::Temp(UNLINK => 1, SUFFIX => '.txt');
+	print $tmpfh $text;
+	$tmpfh->flush();
+	my $filename = $tmpfh->filename;
+	close $tmpfh;
+	system $editor, $filename;
 	my $new = '';
-	while (my $line = <$tmp>) {
-		$new .= $line;
+	if (open(my $fh, $filename)) {
+		while (my $line = <$fh>) {
+			$new .= $line;
+		}
+		close $fh;
 	}
-	close $tmp;
-	unlink $tmp;
+	unlink $tmpfh;
 	return $new;
 }
 
@@ -302,11 +312,13 @@ sub parse_setupfile_text {
 				push @$err_ar, "Invalid line: '$line'";
 				last LINE;
 			}
+#print "tuple found: name=$name value=$value for line: $line\n";
 			push @tuples, [ $name, $value ];
 		}
 	}
 	push @$err_ar, 'No tuples' if !@tuples;
-	return $err_ar if @$err_ar;
+#print "err_ar: '@$err_ar'\n";
+	return(undef, $err_ar) if @$err_ar;
 	($dbinst_hr, $err_ar) = $self->group_tuples(@tuples);
 	return($dbinst_hr, $err_ar);
 }
@@ -315,6 +327,7 @@ sub group_tuples {
 	my($self, @tuples) = @_;
 
 	# XXX this hash should be elsewhere
+	# XXX store the regex strings pre-qr{} and emit them in get_setupfile_text_default (DRY principle)
 	my %field = (
 		dbinst		=> {	regex =>	qr{^[A-Za-z]\w{0,11}$}	},
 		unixuser	=> {	regex =>	qr{^[a-z]\w{0,15}$}	},
@@ -326,11 +339,11 @@ sub group_tuples {
 		dbuser		=> {	regex =>	qr{.}			},
 		password	=> {	regex =>	qr{.?}			},
 		database	=> {	regex =>	qr{.}			},
-		constantstable	=> {	regex =>	qr{^[a-z]\w{0,31}$}	},
+		constantstable	=> {	regex =>	qr{^([a-z]\w{0,31}|)$}	},
 		attributes	=> {	regex =>	qr{.?}			},
 		initial		=> {	regex =>	qr{^[01]?$}		},
-		# XXX we probably want some kind of failover, to go to successive
-		# dbinsts on startup if the initial is down
+		# XXX we probably want some kind of failover, to have the option to
+		# go to successive dbinsts on startup if the initial is down
 	);
 	my @fields = keys %field;
 
@@ -373,7 +386,7 @@ sub group_tuples {
 	# Verify exactly one dbinst has 'initial' set.
 	my @initials = ( );
 	for my $dbinst_name (sort keys %dbinst) {
-		for my $field (keys $dbinst{$dbinst_name}) {
+		for my $field (keys %{$dbinst{$dbinst_name}}) {
 			push @initials, $dbinst_name if $field eq 'initial';
 		}
 	}

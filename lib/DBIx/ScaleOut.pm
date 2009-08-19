@@ -108,7 +108,7 @@ sub startup_stage0 {
 	my $setup_class = "DBIx::ScaleOut::Access::$projinst";
 	require $setup_class; # If this dies, nothing is going to work anyway
 	my $dbinsts_hr = $setup_class->dbinsts;
-	my $initial = (grep { $dbinsts_hr->{$_}{initial} } keys %$dbinsts_hr)[0];
+	my $initial = (grep { $dbinsts_hr->{$_}{initial} } sort keys %$dbinsts_hr)[0];
 	my $driver = $setup_class->{driver} || die "no driver defined in '$projinst'";
 	if (!grep { $_ eq $driver } DBI->available_drivers) { die "driver '$driver' not installed" }
 	my $driver_class = "DBIx::ScaleOut::Driver::$driver";
