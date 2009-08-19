@@ -30,6 +30,6 @@ startup() - has to work when called by db()
 
 projinst is basically a global, stored in $Global->{default_projinst}.  We specifically do not want to pass it in to any methods except as an option to db() which sends it as an option to startup().  I'm pretty sure no ::Base methods should get passed a projinst except new() (when called by db(), typically).
 
-A dbset has to be specific to a projinst because different projects can have dbinsts with the same names. so we store a dbset in $Global->{projinst}{$projinst}{dbset}.
+A dbset has to be specific to a projinst, both because different projects can have dbinsts with the same names, and because even if dbinsts did use the same names to refer to same db's, each project would need separate dbh's to access those DBs to prevent shared handles leading to subtle bugs or security problems. So we store a dbset in $Global->{projinst}{$projinst}{dbset}.
 
 
