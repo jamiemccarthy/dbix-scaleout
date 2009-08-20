@@ -81,6 +81,7 @@ sub do_edit {
 		$setupfile_text = $self->get_edited_text($setupfile_text, $editor);
 		my $err_ar;
 		($dbinst_hr, $err_ar) = $self->parse_setupfile_text($setupfile_text);
+use Data::Dumper; print STDERR "do_edit dbinst_hr: " . Dumper($dbinst_hr);
 		if (!@$err_ar) {
 			$err_ar = $self->check_dbinsts($dbinst_hr);
 		}
@@ -90,7 +91,6 @@ sub do_edit {
 			print $retry_text;
 		}
 	}
-use Data::Dumper; print STDERR "do_edit dbinst_hr: " . Dumper($dbinst_hr);
 	return($setupfile_text, $dbinst_hr);
 }
 
@@ -213,14 +213,15 @@ driver=mysql
 # secure as it enables one more avenue for attack, but it's up
 # to you).  "localhost" works too.
 host=localhost
-# The default port for MySQL is 3306, Postgres is 5432.  Leave
-# blank for your driver's default.
+# The default port for MySQL is 3306, Drizzle is 4427,
+# Postgres is 5432.  Leave blank for your driver's default.
 port=
-# If host is blank, you can specify a unix socket file.  This may
-# look like e.g. /var/run/mysqld5.0/mysql.sock.
+# If you prefer a unix-domain socket to a TCP host:port, set the
+# host to blank and specify here your unix socket file.  This may
+# look like e.g. "/var/run/mysqld5.0/mysql.sock".
 socket=
 # This is the username your client will log into the DB with.
-dbuser=
+dbuser=jamie
 # And the password (or blank for none).  Everything between the /=\\s*/
 # and /\\n/ is the password, so no need to quote special characters.
 # Thus, there's no way to have a newline or any leading whitespace in
@@ -228,9 +229,9 @@ dbuser=
 # no real way around this.  Storing this password effectively punts
 # database authentication down from mysqld to unix, so if you have
 # concerns, make sure your unixuser/unixgroup above are correct.
-password=
+password=r8djoqw6
 # The name of the database you'll be accessing.
-database=
+database=wow
 # The name of the constants table in that database, which stores
 # values that are necessary for the initial stages of setup and
 # which rarely change.  Default is 'dxso_constants'.  (If at runtime
@@ -312,12 +313,12 @@ sub parse_setupfile_text {
 				push @$err_ar, "Invalid line: '$line'";
 				last LINE;
 			}
-#print "tuple found: name=$name value=$value for line: $line\n";
+print "tuple found: name=$name value=$value for line: $line\n";
 			push @tuples, [ $name, $value ];
 		}
 	}
 	push @$err_ar, 'No tuples' if !@tuples;
-#print "err_ar: '@$err_ar'\n";
+print "err_ar: '@$err_ar'\n";
 	return(undef, $err_ar) if @$err_ar;
 	($dbinst_hr, $err_ar) = $self->group_tuples(@tuples);
 	return($dbinst_hr, $err_ar);
@@ -334,7 +335,7 @@ sub group_tuples {
 		unixgroup	=> {	regex =>	qr{^[a-z]\w{0,15}$}	},
 		driver		=> {	regex =>	qr{^(mysql)$}		},
 		host		=> {	regex =>	qr{.?}			},
-		port		=> {	regex =>	qr{^(\d+)?$}		},
+		port		=> {	regex =>	qr{^\d*$}		},
 		socket		=> {	regex =>	qr{.?}			},
 		dbuser		=> {	regex =>	qr{.}			},
 		password	=> {	regex =>	qr{.?}			},
@@ -352,6 +353,7 @@ sub group_tuples {
 	# and every present field is valid.
 	my %dbinst = ( );
 	my $cur_dbinst = { };
+	my $cur_dbinst_name = '';
 	for my $kv (@tuples) {
 		my($key, $value) = @$kv;
 		if (!$field{$key}) {
@@ -365,16 +367,21 @@ sub group_tuples {
 		if ($key eq 'dbinst') {
 			# New dbinst.  If we had an old dbinst, store it
 			# in the list.
+			my $old_dbinst_name = $cur_dbinst_name;
+			$cur_dbinst_name = $value;
 			if (%$cur_dbinst) {
-				$dbinst{$value} = $cur_dbinst;
+				$dbinst{$old_dbinst_name} = $cur_dbinst;
 				$cur_dbinst = { };
 			}
+		} elsif (!$cur_dbinst_name) {
+			push @$err_ar, "key $key encountered before any valid dbinst line";
+			next;
 		}
 		$cur_dbinst->{$key} = $value;
 	}
-	$dbinst{$value} = $cur_dbinst if %$cur_dbinst;
+	$dbinst{$cur_dbinst_name} = $cur_dbinst if %$cur_dbinst;
 	# Verify every field known is present.
-	for my $dbinst_name (keys %dbinst) {
+	for my $dbinst_name (sort keys %dbinst) {
 		my $dbinst = $dbinst{$dbinst_name};
 		my @missing = sort
 			grep { $_ ne 'initial' } # it's OK to omit the 'initial' field
@@ -393,6 +400,28 @@ sub group_tuples {
 	if (scalar(@initials) != 1) {
 		push @$err_ar, "more than one dbinst marked as initial: '@initials'";
 	}
+	# Set defaults.
+	if (!@$err_ar) {
+		for my $dbinst_name (sort keys %dbinst) {
+			my $this_dbinst = $dbinst{$dbinst_name};
+			if (!$this_dbinst->{port} && $this_dbinst->{host} && !$this_dbinst->{socket}) {
+				# Only set default port if TCP sockets are intended,
+				# i.e. if the host is specified and a socket file
+				# is not.
+				$this_dbinst->{port} =
+					  $this_dbinst->{driver} eq 'mysql' ? 3306
+					: $this_dbinst->{driver} eq 'drizzle' ? 4427
+					: $this_dbinst->{driver} eq 'postgres' ? 5432
+					: '';
+				if (!$this_dbinst->{port}) {
+					push @$err_ar, "port must be specified for driver '$this_dbinst->{driver}', no known default";
+				}
+			}
+			if (!$this_dbinst->{constantstable}) {
+				$this_dbinst->{constantstable} = 'dxso_constants';
+			}
+		}
+	}
 	%dbinst = ( ) if @$err_ar;
 	return(\%dbinst, $err_ar);
 }
@@ -404,17 +433,19 @@ sub check_dbinsts {
 		my $dbinst = $dbinst_hr->{$dbinst_name};
 		my $dbh;
 		if (!$self->check_host_ping($dbinst)) {
-			push @$err_ar, "cannot ICMP ping $dbinst->{host}";
+			push @$err_ar, "dbinst $dbinst_name: cannot ICMP ping $dbinst->{host}";
 		} elsif (!$self->check_tcp_socket_connect($dbinst)) {
-			push @$err_ar, "cannot open TCP connection to $dbinst->{host}:$dbinst->{port}";
+			push @$err_ar, "dbinst $dbinst_name: cannot open TCP connection to '$dbinst->{host}:$dbinst->{port}'";
 		} elsif (!$self->check_unix_socket_connect($dbinst)) {
-			push @$err_ar, "cannot connect to unix socket at $dbinst->{socket}";
+			push @$err_ar, "dbinst $dbinst_name: cannot connect to unix socket at '$dbinst->{socket}'";
 		} elsif (!($dbh = $self->check_db_connect($dbinst))) {
-			push @$err_ar, "cannot connect to db and DBI->ping for dbinst $dbinst->{dbinst}, reported error: '" . $DBI::errstr . "'";
+			push @$err_ar, "dbinst $dbinst_name: cannot connect to db for dbinst $dbinst->{dbinst}, reported error: '" . $DBI::errstr . "'";
+		} elsif (!$self->check_db_ping($dbh)) {
+			push @$err_ar, "dbinst $dbinst_name: cannot DBI->ping for dbinst $dbinst->{dbinst}, reported error: '" . $DBI::errstr . "'";
 		} else {
 			my($ok, $errstr) = $self->check_db_select($dbh);
 			if (!$ok) {
-				push @$err_ar, "cannot perform SELECT for dbinst $dbinst->{dbinst}, reported error: '$errstr'";
+				push @$err_ar, "dbinst $dbinst_name: cannot perform SELECT for dbinst $dbinst->{dbinst}, reported error: '$errstr'";
 			}
 		}
 	}
@@ -449,23 +480,28 @@ sub check_unix_socket_connect {
 
 sub check_db_connect {
 	my($self, $dbinst) = @_;
-	# obviously building this string should be a function in DBIx::ScaleOut itself
+	# obviously building this string should be a function elsewhere in DBIx::ScaleOut
 	my $connect_string = "DBI:$dbinst->{driver}:database=$dbinst->{database};host=$dbinst->{hostname}";
 	$connect_string .= ";port=$dbinst->{port}" if $dbinst->{port};
 	my $attr = { ( map { ($1, $2) } grep { /^([^=]+)=(.*)$/ } split / /, $dbinst->{attributes} ) };
-print STDERR "calling DBI->connect '$connect_string' $dbinst->{dbuser}, $dbinst->{password}, $dbinst->{attributes} attr: " . Dumper($attr);
+#print STDERR "calling DBI->connect '$connect_string' $dbinst->{dbuser}, $dbinst->{password}, $dbinst->{attributes} attr: " . Dumper($attr);
 	my $dbh = DBI->connect($connect_string,
 		$dbinst->{dbuser}, $dbinst->{password}, $attr);
-	return '' if !$dbh;
+	return $dbh || '';
+}
+
+sub check_db_ping {
+	my($self, $dbh) = @_;
 	return $dbh->ping ? $dbh : '';
 }
 
 sub check_db_select {
 	my($self, $dbh) = @_;
-	my($ok, $errstr) = ('', '(unknown error)');
+	my($ok, $errstr) = ('', '');
+	my $driver = $dbh->{Driver}{Name}; # "The only recommended use for" ->{Driver}
 	if (!$dbh) {
 		$errstr = $DBI::errstr;
-	} elsif ($dbinst->{driver} eq 'mysql') { # no, test $dbh->{Driver} ... -> something?
+	} elsif ($driver eq 'mysql') {
 		# dbs besides mysql are going to have different ways to do this, right?
 		# maybe we need a DBIx::ScaleOut::Driver::$foo::check_select() method
 print STDERR "calling do SELECT\n";

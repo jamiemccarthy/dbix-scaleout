@@ -57,8 +57,8 @@ my $build = Module::Build->new(
 	create_license	=> 1,
 	create_readme	=> 1,
 	dynamic_config	=> 1,
-#	dist_abstract	=> 1,
-#	dist_author	=> 1,
+#	dist_abstract	=> 'a smart database access layer',
+#	dist_author	=> 'Jamie McCarthy <jamie@mccarthy.vg>',
 	# see Module::Build::API auto_features()
 );
 
@@ -76,20 +76,22 @@ sub get_params {
 		my($setup, $prompt, $default) = @_;
 		return $build->prompt($prompt, $default);
 	}
-	my($configtext, $dbinsts_ar) = $setup->do_edit(\&_prompt_callback);
+	my($configtext, $dbinsts_hr) = $setup->do_edit(\&_prompt_callback);
 
 	# notes() makes the values available everywhere else in the build
 	# process, see e.g. Module::Build::API on current().
-	my $tuples_ar = convert_dbinsts_to_tuples($dbinsts_ar);
+	my $tuples_ar = convert_dbinsts_to_tuples($dbinsts_hr);
 	$build->notes(configtext => $configtext);
 	$build->notes(dbinst_tuples => @$tuples_ar);
 }
 
 sub convert_dbinsts_to_tuples {
-	my($dbinsts_ar) = @_;
+	my($dbinsts_hr) = @_;
+use Data::Dumper;
+print STDERR "convert_dbinsts_to_tuples ar: " . Dumper($dbinsts_hr);
 	my @tuples = ( );
-	for my $hr (@$dbinsts_ar) {
-		my $dbinst = $hr->{dbinst};
+	for my $dbinst (sort keys %$dbinsts_hr) {
+		my $hr = $dbinsts_hr->{$dbinst};
 		push @tuples, { "${dbinst}_dbinst", $dbinst };
 		for my $key (sort keys %$hr) {
 			next if $key eq 'dbinst'; # did this one already

@@ -624,6 +624,10 @@ connect_nocache_dbinst($dbinst) - function
 	too, to prevent the application from having to call this
 	manually.
 
+=head1 AUTHOR
+
+Jamie McCarthy <jamie@mccarthy.vg>
+
 =cut
 
 sub init_class_global {
