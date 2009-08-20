@@ -33,3 +33,9 @@ projinst is basically a global, stored in $Global->{default_projinst}.  We speci
 A dbset has to be specific to a projinst, both because different projects can have dbinsts with the same names, and because even if dbinsts did use the same names to refer to same db's, each project would need separate dbh's to access those DBs to prevent shared handles leading to subtle bugs or security problems. So we store a dbset in $Global->{projinst}{$projinst}{dbset}.
 
 
+
+`perl Build.PL` leaves passwords in _build/notes, so we must chmod 600 it somehow
+
+creation of dbinst_tuples is broken and silly, leave it as hashref-of-hashrefs instead of (brokenly) transforming to array-of-hashrefs; this makes ACTION_install simpler too
+
+
