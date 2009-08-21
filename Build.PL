@@ -1,7 +1,11 @@
 use warnings;
 use strict;
 use Module::Build;
+use File::Path;
+use File::Spec;
 use File::Temp qw( tempfile );
+use IO::File;
+use Data::Dumper;
 
 =head1
 
@@ -11,11 +15,6 @@ see Module::Build::Cookbook I hope for tips here
 idea is to subclass, override ACTION_install, construct Dumper output
 manually in perl from the notes, and print it to the dbinst .pm files
 and the setup .txt file.
-
-Still haven't decided whether the .pm files that will be require'd to
-gain db access should be DBIx::ScaleOut::Setup::foo.pm or
-DBIx::ScaleOut::Access::foo.pm.  The Setup module itself should
-be called Setup though.
 
 build parameter 'script_files' will install scripts like
 	dxso_setup	re-edit the setup access parameters
@@ -28,28 +27,106 @@ my $class = Module::Build->subclass(
 	class => 'Module::Build::DXSO',
 	code => <<'EOSUBCLASS' );
 
+use Data::Dumper;
+use DBIx::ScaleOut::Setup;
+
 sub ACTION_install {
 	my($self) = @_;
+#$Data::Dumper::Sortkeys = 1;
+#print STDERR "self: " . Dumper($self);
+#print STDERR "base_dir: " . Module::Build->current->base_dir . "\n";
+#print STDERR "config_dir: " . Module::Build->current->config_dir . "\n";
 	my $configtext = $self->notes('configtext');
-	my $dbinst_tuples = $self->notes('dbinst_tuples');
-	# 1. write configtext to __DATA__ segment (?) of DBIx/ScaleOut/Setup.pm
-	#    and chown as the current user, chmod 600.
-	# 2. write Dumper()s of tuples to DBIx/ScaleOut/Access/foo.pm
-	#    and chown/chmod them appropriately, as possible
+	my $dbinsts = $self->notes('dbinsts');
+	$Data::Dumper::Sortkeys = 1;
+
+	my $installdirs = $self->{properties}{installdirs};
+	my $install_lib = $self->{properties}{install_sets}{$installdirs}{lib};
+
+	# XXX if non-root user wants to install, here's where they
+	# write the files.  Pretty sure I have $install_lib correct.
+	# Probably want to chown (and if it fails, of course, abort).
+	# If we decide to forbid installation except by root, here's
+	# the place to check euid.
+	my $setupfile_dir = File::Spec->catdir($install_lib,
+		'DBIx', 'ScaleOut', 'Setup');
+	File::Path::make_path($setupfile_dir, { mode => 0755 });
+	my $setupfilename = File::Spec->catfile($setupfile_dir,
+		DBIx::ScaleOut::Setup::SETUPFILENAME);
+	my $old_umask = umask 0077;
+	if (! open(my $fh, '>', $setupfilename)) {
+		die "cannot write $setupfilename: $!";
+	} else {
+		my $text = get_setupfile_text( $self->notes('configtext') );
+		print $fh $text;
+		close $fh;
+		print "Installing $setupfilename\n";
+	}
+
+	my $access_dir = File::Spec->catdir($install_lib,
+		'DBIx', 'ScaleOut', 'Access');
+	File::Path::make_path($access_dir, { mode => 0755 });
+	my $dbinst_hr = $self->notes('dbinsts');
+	umask 0007;
+	for my $dbinst (sort keys %$dbinst_hr) {
+		my $dbinstfilename = File::Spec->catfile($access_dir, "$dbinst.pm");
+		my $unixuser = $dbinst_hr->{$dbinst}{unixuser};
+		my $uid = getpwnam($unixuser);
+		die "cannot find unix user '$unixuser' for dbinst '$dbinst'"
+			if !defined($uid) || !length($uid);
+		my $unixgroup = $dbinst_hr->{$dbinst}{unixgroup};
+		my $gid = getgrnam($unixgroup);
+		die "cannot find unix group '$unixgroup' for dbinst '$dbinst'"
+			if !defined($gid) || !length($gid);
+		if (! open(my $fh, '>', $dbinstfilename)) {
+			die "cannot write $dbinstfilename: $!";
+		} else {
+			my $text = get_dbinst_text($dbinst, $dbinst_hr->{$dbinst});
+			print $fh $text;
+			close $fh;
+			my $count = chown $uid, $gid, $dbinstfilename;
+			if (!$count) {
+				# XXX does chown return 0 if no change was necessary? if so this isn't an error
+				my $chown_err = $!; # XXX look this up
+				unlink $dbinstfilename;
+				die "could not chown($uid, $gid, $dbinstfilename): $chown_err";
+			}
+			print "Installing $dbinstfilename\n";
+		}
+
+	}
+
+	umask $old_umask;
+
 	$self->SUPER::ACTION_install;
+}
+
+sub get_setupfile_text {
+	my($text) = @_;
+	my $dumped = Dumper($text);
+	$dumped =~ s/^\$VAR1 /\$DBIx::ScaleOut::Setup::setupfile /;
+	return qq{$dumped\n1;};
+}
+
+sub get_dbinst_text {
+	my($dbinst, $dbinst_hr) = @_;
+	my $dumped = Dumper($dbinst_hr);
+	$dumped =~ s/^\$VAR1 /\$DBIx::ScaleOut::Access::$dbinst /;
+	return qq{$dumped\n1;};
 }
 
 EOSUBCLASS
 
 ##############################
 
-my $build = Module::Build->new(
+my $build = $class->new(
 	module_name	=> 'DBIx::ScaleOut',
 	license		=> 'perl', # dual-license, either Artistic or GPL, your choice
 	requires	=> {
 		perl		=> '5.6.1',
 		DBI		=> '1.38', # for last_insert_id
 		'DBD::mysql'	=> '3.0', # no real reason to require 3, 2 would probably work
+			# see Module::Build::API "auto_features" for a better way to demand drizzle/mysql/pg
 		'Data::Dumper'	=> '2.0',
 		'Net::Ping'	=> '2.0',
 		'File::Spec'	=> '3.0',
@@ -66,6 +143,8 @@ get_params();
 
 $build->create_build_script;
 
+set_notes_permissions();
+
 ############################################################
 
 sub get_params {
@@ -80,26 +159,12 @@ sub get_params {
 
 	# notes() makes the values available everywhere else in the build
 	# process, see e.g. Module::Build::API on current().
-	my $tuples_ar = convert_dbinsts_to_tuples($dbinsts_hr);
 	$build->notes(configtext => $configtext);
-	$build->notes(dbinst_tuples => @$tuples_ar);
+	$build->notes(dbinsts => $dbinsts_hr);
 }
 
-sub convert_dbinsts_to_tuples {
-	my($dbinsts_hr) = @_;
-use Data::Dumper;
-print STDERR "convert_dbinsts_to_tuples ar: " . Dumper($dbinsts_hr);
-	my @tuples = ( );
-	for my $dbinst (sort keys %$dbinsts_hr) {
-		my $hr = $dbinsts_hr->{$dbinst};
-		push @tuples, { "${dbinst}_dbinst", $dbinst };
-		for my $key (sort keys %$hr) {
-			next if $key eq 'dbinst'; # did this one already
-			push @tuples, { "${dbinst}_$key", $hr->{$key} };
-		}
-	}
-	return \@tuples;
+sub set_notes_permissions {
+	my $notes = File::Spec->catfile($build->base_dir, '_build', 'notes');
+	chmod 0600, $notes;
 }
-
-# XXX remember to strip off unnecessary semicolon from end of sql statements
 

@@ -1,16 +1,15 @@
 package DBIx::ScaleOut::Setup;
 
-#use DBIx::ScaleOut;
 use DBI;
-use Fcntl qw( F_SETFD F_GETFD );
-use File::Temp qw( :seekable );
+#use Fcntl qw( F_SETFD F_GETFD );
+#use File::Temp qw( :seekable );
 use File::Spec;
 use Net::Ping;
 use Data::Dumper;
 
-use fields qw( prompt_callback only_return );
+#use fields qw( prompt_callback only_return );
 
-use constant SETUPFILENAME => '_setupfile.pm';
+sub SETUPFILENAME () { '_setupfile.pm' }
 
 sub new {
 	my($class, $init) = @_;
@@ -81,7 +80,7 @@ sub do_edit {
 		$setupfile_text = $self->get_edited_text($setupfile_text, $editor);
 		my $err_ar;
 		($dbinst_hr, $err_ar) = $self->parse_setupfile_text($setupfile_text);
-use Data::Dumper; print STDERR "do_edit dbinst_hr: " . Dumper($dbinst_hr);
+#print STDERR "do_edit dbinst_hr: " . Dumper($dbinst_hr);
 		if (!@$err_ar) {
 			$err_ar = $self->check_dbinsts($dbinst_hr);
 		}
@@ -158,7 +157,7 @@ sub get_setupfile_text {
 }
 
 sub get_setupfile_text_require {
-	my $filename = 'DBIx/ScaleOut/Setup/' . SETUPFILENAME;
+	my $filename = File::Spec->catfile('DBIx', 'ScaleOut', 'Setup', SETUPFILENAME);
 	eval { require $filename; };
 	return $@ ? '' : $DBIx::ScaleOut::Setup::setupfile;
 }
@@ -273,7 +272,6 @@ sub get_setup_dir {
 
 sub get_edited_text {
 	my($self, $text, $editor) = @_;
-	File::Temp->safe_level(File::Temp::HIGH);
 	my $tmpfh = new File::Temp(UNLINK => 1, SUFFIX => '.txt');
 	print $tmpfh $text;
 	$tmpfh->flush();
@@ -282,12 +280,10 @@ sub get_edited_text {
 	system $editor, $filename;
 	my $new = '';
 	if (open(my $fh, $filename)) {
-		while (my $line = <$fh>) {
-			$new .= $line;
-		}
+		local $/ = undef;
+		$new = <$fh>;
 		close $fh;
 	}
-	unlink $tmpfh;
 	return $new;
 }
 
@@ -313,12 +309,12 @@ sub parse_setupfile_text {
 				push @$err_ar, "Invalid line: '$line'";
 				last LINE;
 			}
-print "tuple found: name=$name value=$value for line: $line\n";
+#print "tuple found: name=$name value=$value for line: $line\n";
 			push @tuples, [ $name, $value ];
 		}
 	}
 	push @$err_ar, 'No tuples' if !@tuples;
-print "err_ar: '@$err_ar'\n";
+#print "err_ar: '@$err_ar'\n";
 	return(undef, $err_ar) if @$err_ar;
 	($dbinst_hr, $err_ar) = $self->group_tuples(@tuples);
 	return($dbinst_hr, $err_ar);
@@ -504,7 +500,6 @@ sub check_db_select {
 	} elsif ($driver eq 'mysql') {
 		# dbs besides mysql are going to have different ways to do this, right?
 		# maybe we need a DBIx::ScaleOut::Driver::$foo::check_select() method
-print STDERR "calling do SELECT\n";
 		$ok = $dbh->do("SELECT VERSION()");
 		$errstr = $ok ? '' : $dbh->errstr;
 	}

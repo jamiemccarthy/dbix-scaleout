@@ -624,6 +624,8 @@ connect_nocache_dbinst($dbinst) - function
 	too, to prevent the application from having to call this
 	manually.
 
+# XXX remember to strip off unnecessary semicolon from end of sql statements
+
 =head1 AUTHOR
 
 Jamie McCarthy <jamie@mccarthy.vg>
