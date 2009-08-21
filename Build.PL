@@ -21,7 +21,15 @@ build parameter 'script_files' will install scripts like
 
 =cut
 
-##############################
+############################################################
+
+# If we want 'perl -MDBIx::ScaleOut::Setup -e edit' to work the most
+# natural way possible, then Module::Build::DXSO should probably be
+# a real class (maybe rename DBIx::ScaleOut::ModuleBuild) and should
+# be installed with the rest of dxso.  I believe the 'code =>' here
+# will have to be passed the text of that .pm file.  However,
+# DBIx::ScaleOut::Setup::edit can 'require' that module and create
+# a new $build of that class.
 
 my $class = Module::Build->subclass(
 	class => 'Module::Build::DXSO',
@@ -34,8 +42,6 @@ sub ACTION_install {
 	my($self) = @_;
 #$Data::Dumper::Sortkeys = 1;
 #print STDERR "self: " . Dumper($self);
-#print STDERR "base_dir: " . Module::Build->current->base_dir . "\n";
-#print STDERR "config_dir: " . Module::Build->current->config_dir . "\n";
 	my $configtext = $self->notes('configtext');
 	my $dbinsts = $self->notes('dbinsts');
 	$Data::Dumper::Sortkeys = 1;
@@ -112,12 +118,14 @@ sub get_dbinst_text {
 	my($dbinst, $dbinst_hr) = @_;
 	my $dumped = Dumper($dbinst_hr);
 	$dumped =~ s/^\$VAR1 /\$DBIx::ScaleOut::Access::$dbinst /;
+	# a text comment noting creation timestamp+user, and a "do not edit
+	# manually" suggestion, would be nice
 	return qq{$dumped\n1;};
 }
 
 EOSUBCLASS
 
-##############################
+############################################################
 
 my $build = $class->new(
 	module_name	=> 'DBIx::ScaleOut',

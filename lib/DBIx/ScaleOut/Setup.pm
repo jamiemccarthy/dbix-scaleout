@@ -7,7 +7,8 @@ use File::Spec;
 use Net::Ping;
 use Data::Dumper;
 
-#use fields qw( prompt_callback only_return );
+use Exporter 'import';
+@EXPORT = qw( edit );
 
 sub SETUPFILENAME () { '_setupfile.pm' }
 
@@ -21,10 +22,14 @@ sub new {
 # FUNCTION, NOT METHOD
 # Intended to be called by e.g.:
 # perl -MDBIx::ScaleOut::Setup -e edit
+# after module is already installed
+
+# See note before Module::Build->subclass call in Build.PL
 
 sub edit {
 	my $setup = DBIx::ScaleOut::Setup->new();
-	$setup->do_edit();
+	my($configtext, $dbinsts_hr) = $setup->do_edit();
+	
 }
 
 # do_edit does all the work, loading current values if any, defaults if
@@ -47,6 +52,12 @@ sub do_edit {
 		# now but it's not a stable solution... would be
 		# better to copy/paste code from M:B:B:p...
 		# also, I don't like how it prints the result
+		#
+		# 2009-08: I don't think it does work, not sure
+		# why I thought it did.  Use which editor? [/usr/bin/vi ]Can't
+		# call method "_is_unattended" on an undefined
+		# value at /usr/local/lib/perl5/5.10.0/Module/Build/Base.pm
+		# line 532, <DATA> line 644.
 		my($self, $prompt, $def) = @_;
 		return Module::Build::Base::prompt(undef, $prompt, $def);
 	}
