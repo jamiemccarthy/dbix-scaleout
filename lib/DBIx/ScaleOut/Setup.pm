@@ -2,7 +2,7 @@ package DBIx::ScaleOut::Setup;
 
 use DBI;
 #use Fcntl qw( F_SETFD F_GETFD );
-#use File::Temp qw( :seekable );
+use File::Temp;
 use File::Spec;
 use Net::Ping;
 use Data::Dumper;
