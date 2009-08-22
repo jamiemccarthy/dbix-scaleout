@@ -111,7 +111,7 @@ sub foreach_purpose {
 					$duples);
 			}
 		}
-        }
+	}
 }
 
 # This is the main reason for this class:  to scan through a purpose,
