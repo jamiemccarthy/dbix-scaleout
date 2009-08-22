@@ -840,8 +840,8 @@ sub process_raw_iinstset {
 	for my $hr (@$ar) {
 		my(	            $shard, $purpose,    $gen,       $weight, $dbinst) =
 			    @$hr{qw( shard   purpose      gen         weight   dbinst )};
-		        $iinstset->{$shard}{$purpose} ||= [ ];
-		        $iinstset->{$shard}{$purpose}   [$gen] ||= [                  ];
+			$iinstset->{$shard}{$purpose} ||= [ ];
+			$iinstset->{$shard}{$purpose}   [$gen] ||= [                  ];
 		push @{ $iinstset->{$shard}{$purpose}   [$gen] },  [ $weight, $dbinst ];
 	}
 	# If there's no purpose given for the main shard (which will be
@@ -851,7 +851,7 @@ sub process_raw_iinstset {
 	# to itself.
 	for my $purpose (qw( r w )) {
 		next if defined $iinstset->{main}{$purpose}[0];
-		                $iinstset->{main}{$purpose}[0] =   [       1,  'main' ];
+				$iinstset->{main}{$purpose}[0] =   [       1,  'main' ];
 	}
 	# Normalize weights.
 	sub _normalize_weights {
@@ -1003,16 +1003,16 @@ sub selectRowA {
 	# trace start
 
 	my $sql = "SELECT $cols FROM $tables WHERE $where$other";
-        my $sth = $dbh->prepare($sql);
-        if (!$sth->execute()) {
-                $self->log_error($sql);
-                return undef;
-        }
-        my @r = $sth->fetchrow();
-        $sth->finish();
+	my $sth = $dbh->prepare($sql);
+	if (!$sth->execute()) {
+		$self->log_error($sql);
+		return undef;
+	}
+	my @r = $sth->fetchrow();
+	$sth->finish();
 
 	# trace finish
-        # querylog finish
+	# querylog finish
 
 	@r;
 }
