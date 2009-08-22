@@ -53,7 +53,7 @@ sub do_edit {
 		# better to copy/paste code from M:B:B:p...
 		# also, I don't like how it prints the result
 		#
-		# 2009-08: I don't think it does work, not sure
+		# 2009-08: I don't think undef does work, not sure
 		# why I thought it did.  Use which editor? [/usr/bin/vi ]Can't
 		# call method "_is_unattended" on an undefined
 		# value at /usr/local/lib/perl5/5.10.0/Module/Build/Base.pm
@@ -114,9 +114,12 @@ sub write_files {
 		# (it has to define dbinsts() which returns a hashref of dbinsts)
 		# Its $dbinsts arrayref contains the data.
 		# Don't forget to insert a comment as first line
-	# put together a {dsn} field for each dbinst
+	# put together a {dsn} field for each dbinst -- no, probably construct this when used
 	# and assign any blank fields their defaults, incl.: port, constantstable
 	# (if socket or hostname+port are blank, leave blank because the other is used, of course)
+
+	# currently this is all done in D:S:ModuleBuild::ACTION_install
+	# and needs to be moved here
 }
 
 sub get_intro_text {
@@ -251,8 +254,8 @@ constantstable=
 attributes=
 # The initial dbinst is the one that DBIx::ScaleOut connects to,
 # to obtain some information necessary to initialize itself.
-# Typically this would be your "main" writer DB.  Don't define more
-# than one dbinst as initial.
+# Typically this would be your "main" dbinst, your writer.
+# Don't define more than one dbinst as initial.
 initial=1
 
 ##############################
@@ -350,8 +353,18 @@ sub group_tuples {
 		constantstable	=> {	regex =>	qr{^([a-z]\w{0,31}|)$}	},
 		attributes	=> {	regex =>	qr{.?}			},
 		initial		=> {	regex =>	qr{^[01]?$}		},
-		# XXX we probably want some kind of failover, to have the option to
-		# go to successive dbinsts on startup if the initial is down
+		# XXX I'm pretty sure if 'initial' is kept as a
+		# field, we need to allow multiple dbinsts to have
+		# a chain of them, go to successive dbinsts on startup
+		# if the first one is down.  (That can't be handled
+		# at the iinst level because that information is
+		# loaded from the initial dbinst.)  This whole "initial"
+		# thing is a fussy way of providing a backup/alternative
+		# way of specifying the default dbinst for project,
+		# and (on the other hand) making the default have the
+		# same name (no failover) is probably good enough for
+		# almost all cases and has the advantage of simplicity --
+		# so let's consider dropping initial entirely.
 	);
 	my @fields = keys %field;
 

@@ -1,13 +1,15 @@
 use warnings;
 use strict;
 
+# Add ./lib to @INC to pull in the module that subclasses Module::Build.
+# After that, remove it.  (Leaving it would confuse some later parts of
+# the build process, e.g. would trick './Build diff' into diffing against
+# the copies in lib/ instead of those in the natural @INC.)
 use lib 'lib';
 use DBIx::ScaleOut::ModuleBuild;
+no lib 'lib';
 
 use File::Spec;
-#use File::Temp qw( tempfile );
-#use IO::File;
-#use Data::Dumper;
 
 =head1
 
