@@ -14,6 +14,7 @@ use warnings;
 # which your application's db classes will subclass.
 
 use base 'Exporter';
+use Config;
 use DBI;
 use Storable;
 use Cache::Memory;
@@ -35,7 +36,7 @@ our $Global = undef;
 
 # Subclassing DBIx::ScaleOut to override this doesn't work unless
 # you call YourClass->new() ???  To set something in $Global?  I dunno
-# XXX figure out how to allow custom ::ScaleOut subclasses
+# XXX figure out how to allow custom DBIx::ScaleOut subclasses
 sub default_projinst	{ 'main' }
 
 #========================================================================
@@ -96,10 +97,6 @@ sub startup {
 	$class->startup_ready();
 }
 
-sub reroll {
-	$Global->{rollcount}++;
-}
-
 # stage0: require perl modules and create stub $Global
 
 sub startup_stage0 {
@@ -152,7 +149,7 @@ sub startup_stage1 {
 	$class->startup_stage1_setvariabledefaults($raw_variables);
 	$class->startup_stage1_setdat($raw_variables);
 
-	$class->startup_stage1_classinst();
+#	$class->startup_stage1_classinst();
 	$class->startup_stage1_dbset();
 
 	$class->startup_stage1_memcached();
@@ -226,6 +223,8 @@ sub startup_stage1_setconstants {
 
 sub startup_stage1_digestvariablestable {
 	my($class, $dbh) = @_;
+	my $projinst = $Global->{default_projinst};
+	my $gp = $Global->{projinst}{$projinst};
 	my $table_name = $gp->{constants}{dxso_variablestable};
 	$class->startup_stage1_digesttable($dbh, $table_name);
 }
@@ -252,7 +251,7 @@ sub startup_stage1_setvariabledefaults {
 		dxso_dat_expiretime	=> 300,
 	);
 	for my $key (keys %defaults) {
-		$v->{$key} = $defaults->{$key} if !defined $v->{$key};
+		$v->{$key} = $defaults{$key} if !defined $v->{$key};
 	}
 }
 
@@ -265,7 +264,7 @@ sub startup_stage1_setdat {
 	for my $key (keys %$raw_variables) {
 		# Data pulled from constants used to get this far
 		# cannot be overwritten.
-		next if key =~ /^dxso_(constantstable|variablestable)$/;
+		next if $key =~ /^dxso_(constantstable|variablestable)$/;
 		# Other variables do overwrite constants.
 		$v->{$key} = $raw_variables->{$key};
 	}
@@ -276,36 +275,36 @@ sub startup_stage1_setdat {
 	$gp->{dat} = $v;
 }
 
-sub startup_stage1_classinst {
-	$Global->{db_classinst_cache} = { };
-	# Retrieve the iinstset.
-	my $projinst = $Global->{default_projinst};
-	my $gp = $Global->{projinst}{$projinst};
-	my $constants = $gp->{constants};
-	my $iinstset_tablename = $constants->{dxso_iinstsettable};
-	my $iinstset_raw =
-		$dbh->selectall_arrayref(
-			"SELECT * FROM $iinstset_tablename WHERE projinst=" . $dbh->quote($projinst),
-			{ Slice => {} })
-		|| [ ];
-	my $iinstset = process_raw_iinstset($projinst, $iinstset_raw);
-	$gp->{iinstset} = $iinstset;
-
-}
+#sub startup_stage1_classinst {
+#	$Global->{db_classinst_cache} = { };
+#	# Retrieve the iinstset.
+#	my $projinst = $Global->{default_projinst};
+#	my $gp = $Global->{projinst}{$projinst};
+#	my $constants = $gp->{constants};
+#	my $iinstset_tablename = $constants->{dxso_iinstsettable};
+#	my $iinstset_raw =
+#		$dbh->selectall_arrayref(
+#			"SELECT * FROM $iinstset_tablename WHERE projinst=" . $dbh->quote($projinst),
+#			{ Slice => {} })
+#		|| [ ];
+#	my $iinstset = process_raw_iinstset($projinst, $iinstset_raw);
+#	$gp->{iinstset} = $iinstset;
+#
+#}
 
 sub startup_stage1_dbset {
 	my($class) = @_;
 	my $do_ping = $Global->{dat}{dxso_startup_ping_all_dbinsts};
 	# make a DBSet and store it somewhere appropriate
 	my $projinst = $Global->{default_projinst};
-	my $dbset = DBIx::ScaleOut::DBSet->new($
+	my $dbset = DBIx::ScaleOut::DBSet->new();
 }
 
 sub startup_stage1_memcached {
 	my($class) = @_;
 	# this Cache::Memcached is going to get fork()ed, does its new()
 	# set up any connections that this could cause a problem for?
-	my $day = $Global->{dat};
+	my $dat = $Global->{dat};
 	return if !$dat->{dxso_memcached};
 	my $servers = $dat->{dxso_memcached_servers};
 	my $debug = $dat->{dxso_memcached_debug};
@@ -633,25 +632,25 @@ Jamie McCarthy <jamie@mccarthy.vg>
 =cut
 
 sub init_class_global {
-	if (!defined $global) {
+	if (!defined $Global) {
 		if ($ENV{GATEWAY_INTERFACE} && (my $r = Apache->request)) {
 			my $cfg = Apache::ModuleConfig->get($r, 'Slash::Apache');
-			$global = $cfg->{dxso_global} ||= {};
+			$Global = $cfg->{dxso_global} ||= {};
 		} else {
-			$global = {};
+			$Global = {};
 		}
 	}
 }
 
-sub get_class_global { $global }
+sub get_class_global { $Global }
 
 sub get_constants {
 	my($projinst) = @_;
 	die "createDB() has not been called"
-		if !$global;
+		if !$Global;
 	die "createDB() has not been called for projinst '$projinst'"
-		if !$global->{projinst}{$projinst};
-	return $global->{projinst}{$projinst}{constants};
+		if !$Global->{projinst}{$projinst};
+	return $Global->{projinst}{$projinst}{constants};
 }
 
 # Basically a cached new().  Objects of a given (projinst, class, shard)
@@ -726,13 +725,14 @@ sub get_constants {
 # Class method.
 
 sub reroll {
-	my($class, $projinst) = @_;
-	$projinst ||= $global->{default_projinst};
-	my $dbobjcache = $global->{projinst}{$projinst}{dbobjcache};
-	for my $key (sort keys %$dbobjcache) {
-		$dbobjcache->{$key}->check_rollback();
+	my($class) = @_;
+	for my $projinst (sort keys %{$Global->{projinst}}) {
+		my $dbobjcache = $Global->{projinst}{$projinst}{dbobjcache};
+		for my $key (sort keys %$dbobjcache) {
+			$dbobjcache->{$key}->check_rollback();
+		}
+		$Global->{projinst}{$projinst}{rollcount}++;
 	}
-	$global->{projinst}{$projinst}{rollcount}++;
 }
 
 # obj method in ::DB
@@ -755,7 +755,7 @@ sub createDB {
 	$projinst ||= 'main';
 	# If this project was already created and initialized,
 	# no need to repeat ourselves.
-	return if $global->{projinst}{$projinst};
+	return if $Global->{projinst}{$projinst};
 
 	# maybe set a default shard too?
 	# hmmm no I think the default shard should always be 'main'.
@@ -778,7 +778,7 @@ sub createDB {
 			{ Slice => {} })
 		|| [ ];
 	my $constants = process_raw_constants($projinst, $constants_raw);
-	$global->{projinst}{$projinst}{constants} = $constants;
+	$Global->{projinst}{$projinst}{constants} = $constants;
 
 	# Retrieve the iinstset.
 	my $iinstset_tablename = $constants->{iinstset_tablename};
@@ -788,11 +788,11 @@ sub createDB {
 			{ Slice => {} })
 		|| [ ];
 	my $iinstset = process_raw_iinstset($projinst, $iinstset_raw);
-	$global->{projinst}{$projinst}{iinstset} = $iinstset;
+	$Global->{projinst}{$projinst}{iinstset} = $iinstset;
 
 	# Set up the DBSet and the caches.
 	my $dbset = DBIx::ScaleOut::DBSet->new($projinst);
-	$global->{projinst}{$projinst}{dbset} = $dbset;
+	$Global->{projinst}{$projinst}{dbset} = $dbset;
 	if ($constants->{memcached_use}) {
 		my $memcached = create_memcached_object($projinst, $constants);
 ###		$global->{projinst}{$projinst}{memcached} = $memcached;
@@ -806,9 +806,9 @@ sub createDB {
 	# set up, we can retrieve this data in the usual way.
 #	my $vars_raw = getDB()->getKV('objecttype');
 
-	$global->{projinst}{$projinst}{rollcount} = 1;
+	$Global->{projinst}{$projinst}{rollcount} = 1;
 
-	$global->{default_projinst} = $projinst unless $not_default;
+	$Global->{default_projinst} = $projinst unless $not_default;
 }
 
 sub process_raw_constants {
@@ -884,7 +884,7 @@ sub handle_fork {
 
 sub get_dbset {
 	my($self) = @_;
-	return $global->{projinst}{ $self->{projinst} }{dbset};
+	return $Global->{projinst}{ $self->{projinst} }{dbset};
 }
 
 ############################################################
@@ -942,7 +942,7 @@ sub connect {
 	my $projinst = $self->{projinst};
 	my $dbset = $self->get_dbset();
 	my $shard = $self->{shard};
-	my $proj_rollcount = $global->{projinst}{$projinst}{rollcount};
+	my $proj_rollcount = $Global->{projinst}{$projinst}{rollcount};
 	my $reroll = $self->{rollcount} < $proj_rollcount;
 	if ($reroll || !$self->{w_dbh} || !$self->{w_dbh}->{Active}) {
 		($self->{w_dbh}, $self->{w_dbinst}) = $dbset->get($shard, 'w');

@@ -25,12 +25,12 @@ sub new {
 	die "startup() has not been called"
 		if !$DBIx::ScaleOut::Global;
 
-	my $global = $DBIx::ScaleOut::Global;
+	my $Global = $DBIx::ScaleOut::Global;
 
 	# If a projinst isn't specified, default to the current projinst.
-	my $projinst = $opts->{projinst} || $global->{default}{projinst};
+	my $projinst = $opts->{projinst} || $Global->{default}{projinst};
 	die "startup() has not been called for projinst '$projinst'"
-		if !$global->{projinst}{$projinst};
+		if !$Global->{projinst}{$projinst};
 
 	$shard    ||= default_shard();
 	$purpose  ||= default_purpose();
