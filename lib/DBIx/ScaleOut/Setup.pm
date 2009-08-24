@@ -240,8 +240,9 @@ dbuser=jamie
 # Thus, there's no way to have a newline or any leading whitespace in
 # your password.  The password will be stored as plaintext:  there's
 # no real way around this.  Storing this password effectively punts
-# database authentication down from mysqld to unix, so if you have
-# concerns, make sure your unixuser/unixgroup above are correct.
+# database authentication down from mysql to unix -- that's a
+# DBIx::ScaleOut feature -- so if you have concerns, make sure your
+# unixuser/unixgroup above are correct.
 password=r8djoqw6
 # The name of the database you'll be accessing.
 database=wow
@@ -250,7 +251,8 @@ database=wow
 # which rarely change.  Default is 'dxso_constants'.  (If at runtime
 # this table is not present, defaults will be used instead.)
 constantstable=
-# DBI attributes go here, "k1=v1 k2=v2", but you won't usually have any.
+# DBI connect attributes go here, "k1=v1;k2=v2", but you won't usually
+# need any.
 attributes=
 # The initial dbinst is the one that DBIx::ScaleOut connects to,
 # to obtain some information necessary to initialize itself.

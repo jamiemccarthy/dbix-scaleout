@@ -40,6 +40,8 @@ my $build = DBIx::ScaleOut::ModuleBuild->new(
 		'Data::Dumper'	=> '2.0',
 		'Net::Ping'	=> '2.0',
 		'File::Spec'	=> '3.0',
+		'Cache::Memory' => '2.0',
+		'Cache::Memcached' => '1.26',
 	},
 	create_license	=> 1,
 	create_readme	=> 1,

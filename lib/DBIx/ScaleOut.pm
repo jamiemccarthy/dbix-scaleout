@@ -34,10 +34,7 @@ our($VERSION) = ' $Revision: 0.01 $ ' =~ /\$Revision:\s+([^\s]+)/;
 # startup time, and to persist through Apache child forks.
 our $Global = undef;
 
-# Subclassing DBIx::ScaleOut to override this doesn't work unless
-# you call YourClass->new() ???  To set something in $Global?  I dunno
-# XXX figure out how to allow custom DBIx::ScaleOut subclasses
-sub default_projinst	{ 'main' }
+sub default_projinst { 'main' }
 
 #========================================================================
 
@@ -59,12 +56,13 @@ sub db {
 
 	return
 		$Global->{db_classinst_cache}{$class}{$shard}{$purpose}
-			||= $class->create($shard, $purpose);
+			||= $class->create($shard, $purpose, $options);
 }
 
 sub dat {
 	my($name) = @_;
-	return $name ? $Global->{dat}{$name} : $Global->{dat};
+	my $gp = $Global->{projinst}{ $Global->{default_projinst} };
+	return $name ? $gp->{dat}{$name} : $gp->{dat};
 }
 
 # startup:
@@ -76,7 +74,7 @@ sub dat {
 # 'require' some modules that this project will need and initialize
 # the global variable.
 #
-# then connect to writer, read constants (maybe thru ::Setup? Access?)
+# then connect to writer (thru ::Access), read constants
 #
 # then
 # - read vars table
@@ -95,6 +93,7 @@ sub startup {
 	$class->startup_stage0($projinst);
 	$class->startup_stage1();
 	$class->startup_ready();
+print STDERR "startup() complete: " . Dumper($Global);
 }
 
 # stage0: require perl modules and create stub $Global
@@ -102,22 +101,116 @@ sub startup {
 sub startup_stage0 {
 	my($class, $projinst) = @_;
 
-	my $setup_class = "DBIx::ScaleOut::Access::$projinst";
-	require $setup_class; # If this dies, nothing is going to work anyway
-	my $dbinsts_hr = $setup_class->dbinsts;
-	my $initial = (grep { $dbinsts_hr->{$_}{initial} } sort keys %$dbinsts_hr)[0];
-	my $driver = $setup_class->{driver} || die "no driver defined in '$projinst'";
-	if (!grep { $_ eq $driver } DBI->available_drivers) { die "driver '$driver' not installed" }
-	my $driver_class = "DBIx::ScaleOut::Driver::$driver";
-	require $driver_class; # ditto
+	startup_stage0_initglobal();
 
-	$Global = {
-		rollcount	=> 0,
-		believed_pid	=> $$,
-		default_projinst => $projinst,
-		dbinst		=> $dbinsts_hr,
-		initial_dbinst	=> $initial,
+	my $initial_dbinst = startup_stage0_loaddbinst($projinst);
+	if (!$initial_dbinst) { die "cannot load dbinst $projinst: $@" }
+
+	my $driver_class = startup_stage0_loaddriver($initial_dbinst->{driver});
+
+	startup_stage0_setdbinstdsn($initial_dbinst, $driver_class);
+
+	$Global->{default_projinst} = $projinst;
+	$Global->{projinst}{$projinst} = {
+		rollcount       => 0,
+		pid             => $$,
+		initial_dbinst  => $initial_dbinst,
 	};
+}
+
+sub startup_stage0_setdbinstdsn {
+	my($dbinst, $driver_class) = @_;
+	$dbinst->{dsn} = $driver_class->get_dsn($dbinst);
+}
+
+sub startup_stage0_initglobal {
+	if (!defined $Global) {
+		if ($ENV{GATEWAY_INTERFACE} && (my $r = Apache->request)) {
+			my $cfg = Apache::ModuleConfig->get($r, 'Slash::Apache');
+			$Global = $cfg->{dxso_global} ||= {};
+		} else {
+			$Global = {};
+		}
+	}
+}
+
+{
+my %classes;
+sub startup_stage0_loadclass {
+	my($class) = @_;
+
+	# If we use a cache, we won't actually call eval.  If that's the
+	# case, make sure we don't mislead the caller as to whether
+	# there's an error.
+	undef $@;
+
+	if ($Global->{classref}{$class}) {
+		# The eval to load this class was called earlier.  If it
+		# succeeded, this cached value will be 1;  otherwise it
+		# will be 'NA'.  Note that in this case, we return false
+		# indicating error without setting $@ to what the error
+		# was.
+		return($Global->{classref}{$class} ne 'NA');
+	}
+
+	# To avoid calling eval unless necessary (eval'ing a string is slow),
+	# we also check %INC.  If this class was perhaps require'd by some
+	# other part of the code, we can avoid an eval here.
+	(my $file = $class) =~ s|::|/|g;
+	eval "require $class" unless exists $INC{"$file.pm"};
+
+	if ($@) {
+		# Our attempt to load the class failed.  Return false,
+		# and in this case, $@ tells what the error was.
+		$Global->{classref}{$class} = 'NA';
+		return 0;
+	}
+	# We loaded the class successfully.  Set the cache to 1 to
+	# short-circuit the next time loadClass is called, and
+	# return true.
+	return $Global->{classref}{$class} = 1;
+}
+}
+
+sub startup_stage0_loaddriver {
+	my($driver) = @_;
+	# this is probably fast enough that there's no point to another layer of caching
+	die "no driver defined" if !$driver;
+	if (!grep { $_ eq $driver } DBI->available_drivers) { die "DBI driver '$driver' not installed" }
+	my $driver_class = "DBIx::ScaleOut::Driver::$driver";
+	if (!startup_stage0_loadclass($driver_class)) { die "cannot load $driver_class: $@" }
+	return $driver_class;
+}
+
+{
+my %dbinsts;
+sub startup_stage0_loaddbinst {
+	my($dbinstname) = @_;
+
+	my $class = "DBIx::ScaleOut::Access::$dbinstname";
+
+	if ($dbinsts{$dbinstname}) {
+		if ($dbinsts{$dbinstname} eq 'NA') {
+			return 0; # previous failure
+		}
+		return $dbinsts{$dbinstname}; # previous success
+	}
+
+	return 0 if ! startup_stage0_loadclass($class);
+
+	my $dbinst;
+	{
+		no strict 'refs';
+		$dbinst = $$class; # name of the class is the name of its hashref
+	}
+
+	if (defined $dbinst) {
+		return $dbinsts{$dbinstname} = $dbinst;
+	} else {
+		$dbinsts{$dbinstname} = 'NA';
+		return 0;
+	}
+}
 }
 
 # startup_stage1: connect to writer DB, retrieve constants table,
@@ -133,10 +226,13 @@ sub startup_stage1 {
 
 	my $projinst = $Global->{default_projinst};
 	my $gp = $Global->{projinst}{$projinst};
-	# when we enable multiple connection attempts with a connectorder
+
+	# XXX when we enable multiple connection attempts with a connectorder
 	# (in case the first choice writer db is down), the params should
-	# be a list and the connection attempt should be in a loop
-	my $initial_dbinst = $gp->{dbinst}{ $gp->{initial_dbinst} };
+	# be a list and the connection attempt should be in a loop.  This is
+	# the main place where "initial=1" would get used.
+
+	my $initial_dbinst = $gp->{dbinst}{$projinst};
 
 	my $initial_dbh = $class->startup_stage1_connect($initial_dbinst);
 	die "startup_stage1 cannot connect" if !$initial_dbh;
@@ -149,7 +245,7 @@ sub startup_stage1 {
 	$class->startup_stage1_setvariabledefaults($raw_variables);
 	$class->startup_stage1_setdat($raw_variables);
 
-#	$class->startup_stage1_classinst();
+	$class->startup_stage1_classinst($initial_dbh);
 	$class->startup_stage1_dbset();
 
 	$class->startup_stage1_memcached();
@@ -217,7 +313,7 @@ sub startup_stage1_setconstants {
 	$c->{dxso_constantstable} = $dbinst->{constantstable};
 	$c->{dxso_variablestable} ||= 'dxso_variables';
 	$c->{dxso_iinstsettable} ||= 'dxso_iinstset';
-	# and set other defaults
+	# and set other default constants...
 	$gp->{constants} = \%$c;
 }
 
@@ -257,8 +353,7 @@ sub startup_stage1_setvariabledefaults {
 
 sub startup_stage1_setdat {
 	my($class, $raw_variables) = @_;
-	my $projinst = $Global->{default_projinst};
-	my $gp = $Global->{projinst}{$projinst};
+	my $gp = $Global->{projinst}{ $Global->{default_projinst} };
 	my $constants = $gp->{constants};
 	my $v = \%$constants;
 	for my $key (keys %$raw_variables) {
@@ -275,36 +370,41 @@ sub startup_stage1_setdat {
 	$gp->{dat} = $v;
 }
 
-#sub startup_stage1_classinst {
-#	$Global->{db_classinst_cache} = { };
-#	# Retrieve the iinstset.
-#	my $projinst = $Global->{default_projinst};
-#	my $gp = $Global->{projinst}{$projinst};
-#	my $constants = $gp->{constants};
-#	my $iinstset_tablename = $constants->{dxso_iinstsettable};
-#	my $iinstset_raw =
-#		$dbh->selectall_arrayref(
-#			"SELECT * FROM $iinstset_tablename WHERE projinst=" . $dbh->quote($projinst),
-#			{ Slice => {} })
-#		|| [ ];
-#	my $iinstset = process_raw_iinstset($projinst, $iinstset_raw);
-#	$gp->{iinstset} = $iinstset;
-#
-#}
+sub startup_stage1_classinst {
+	my($dbh) = @_;
+	my $projinst = $Global->{default_projinst};
+	my $gp = $Global->{projinst}{$projinst};
+	$gp->{db_classinst_cache} = { };
+	# Retrieve the iinstset.
+	my $constants = $gp->{constants};
+	my $iinstset_tablename = $constants->{dxso_iinstsettable};
+	my $iinstset_raw =
+		$dbh->selectall_arrayref(
+			"SELECT * FROM $iinstset_tablename WHERE projinst=?",
+			{ Slice => {} },
+			$projinst,
+		)
+		|| [ ];
+	my $iinstset = process_raw_iinstset($projinst, $iinstset_raw);
+	$gp->{iinstset} = $iinstset;
+
+}
 
 sub startup_stage1_dbset {
 	my($class) = @_;
-	my $do_ping = $Global->{dat}{dxso_startup_ping_all_dbinsts};
-	# make a DBSet and store it somewhere appropriate
 	my $projinst = $Global->{default_projinst};
-	my $dbset = DBIx::ScaleOut::DBSet->new();
+	my $gp = $Global->{projinst}{$projinst};
+	my $do_ping = $gp->{dat}{dxso_startup_dbinsts_ping_all};
+	# make a DBSet and store it somewhere appropriate
+	$gp->{dbset} = DBIx::ScaleOut::DBSet->new($projinst, $do_ping);
 }
 
 sub startup_stage1_memcached {
 	my($class) = @_;
-	# this Cache::Memcached is going to get fork()ed, does its new()
+	# XXX this Cache::Memcached is going to get fork()ed, does its new()
 	# set up any connections that this could cause a problem for?
-	my $dat = $Global->{dat};
+	my $gp = $Global->{projinst}{ $Global->{default_projinst} };
+	my $dat = $gp->{dat};
 	return if !$dat->{dxso_memcached};
 	my $servers = $dat->{dxso_memcached_servers};
 	my $debug = $dat->{dxso_memcached_debug};
@@ -320,7 +420,7 @@ sub startup_stage1_memcached {
 		warn "ignoring memcached, cannot connect to '$servers'";
 		$memcached = '';
 	}
-	$Global->{cache}{memcached} = $memcached;
+	$gp->{cache}{memcached} = $memcached;
 }
 
 sub startup_stage1_cachememory {
@@ -328,7 +428,8 @@ sub startup_stage1_cachememory {
 	# presumably fork()ing a Cache::Memory is not a problem
 	# XXX keep in mind Brian's in-process memcached idea
 	my $projinst = $Global->{projinst};
-	my $dat = $Global->{dat};
+	my $gp = $Global->{projinst}{$projinst};
+	my $dat = $gp->{dat};
 	# some constants should override these, obviously
 	my $cachememory = Cache::Memory->new(
 		namespace =>		"dsxo_$projinst",
@@ -340,23 +441,24 @@ sub startup_stage1_cachememory {
 		warn "ignoring cachememory, cannot Cache::Memory->new";
 		$cachememory = '';
 	}
-	$Global->{cache}{memory} = $cachememory;
+	$gp->{cache}{memory} = $cachememory;
 }
 
 sub cache_get {
 	my($class, $bits, $key) = @_;
 	return undef if !$bits;
+	my $gp = $Global->{projinst}{ $Global->{default_projinst} };
 	my $val;
 	# XXX should be constants. need a DBIx::ScaleOut::Constants?
 	if ($bits & 0x1) {
 		# check hard perl cache, return if found
-		$val = $Global->{cache}{hardperl}{$key};
+		$val = $gp->{cache}{hardperl}{$key};
 		return $val if defined $val;
 	}
-	if ($bits & 0x2 && $Global->{cache}{memory}) {
+	if ($bits & 0x2 && $gp->{cache}{memory}) {
 		# check Cache::Memory, return if found
 		# Cache::Memory doesn't handle complex structures automatically.
-		$val = $Global->{cache}{memory}->get($key);
+		$val = $gp->{cache}{memory}->get($key);
 		if (defined $val && length $val) {
 			# In one expression we can both test the first byte
 			# of the retrieved value and clear it (so the
@@ -370,9 +472,9 @@ sub cache_get {
 			return $val;
 		}
 	}
-	if ($bits & 0x4 && $Global->{cache}{memcached}) {
+	if ($bits & 0x4 && $gp->{cache}{memcached}) {
 		# check memcached, return if found
-		my $val = $Global->{cache}{memcached}->get($key);
+		my $val = $gp->{cache}{memcached}->get($key);
 		return $val if defined $val;
 	}
 	return undef;
@@ -383,57 +485,45 @@ sub cache_get {
 sub cache_set {
 	my($class, $bits, $expir, $key, $value) = @_;
 	return if !$bits;
+	my $gp = $Global->{projinst}{ $Global->{default_projinst} };
 	if ($bits & 0x1) {
-		$Global->{cache}{hardperl}{$key} = $value;
+		$gp->{cache}{hardperl}{$key} = $value;
 	}
-	if ($bits & 0x2 && $Global->{cache}{memory}) {
+	if ($bits & 0x2 && $gp->{cache}{memory}) {
 		# Cache::Memory doesn't handle complex structures automatically.
 		if (ref $value) {
 			$value = "1" . Storable::nfreeze($value);
 		} else {
 			$value = "0$value";
 		}
-		$Global->{cache}{memory}->set($key, $value, $expir);
+		$gp->{cache}{memory}->set($key, $value, $expir);
 	}
-	if ($bits & 0x4 && $Global->{cache}{memcached}) {
-		$Global->{cache}{memcached}->set($key, $value);
+	if ($bits & 0x4 && $gp->{cache}{memcached}) {
+		$gp->{cache}{memcached}->set($key, $value);
 	}
 }
 
 sub cache_delete {
 	my($class, $bits, $key) = @_;
+	my $gp = $Global->{projinst}{ $Global->{default_projinst} };
 	if ($bits & 0x1) {
-		delete $Global->{cache}{hardperl}{$key};
+		delete $gp->{cache}{hardperl}{$key};
 	}
 	if ($bits & 0x2) {
-		$Global->{cache}{memory}->remove($key);
+		$gp->{cache}{memory}->remove($key);
 	}
 	if ($bits & 0x4) {
 		# XXX a datum to indicate a default memcached
 		# deletion time maybe? since it relates to
 		# reader replication lag, maybe should be
 		# iinst-specific?
-		$Global->{cache}{memcached}->delete($key, 0);
+		$gp->{cache}{memcached}->delete($key, 0);
 	}
 }
 
 
 ############################################################
 ############################################################
-
-sub getConstants {
-	my($projinst) = @_;
-	$projinst ||= default_projinst();
-	my $setup_class = "DBIx::ScaleOut::Setup::$projinst";
-	require $setup_class;
-	my $constantstable = $setup_class->{constantstable};
-	# hit the main shard directly (in a way that doesn't use ::Base)
-	# and do a straight key-value extraction on the constants table
-	# then apply reasonable defaults
-	my $constants = { };
-	$constants->{class_default} = 'DBIx::ScaleOut::Base';
-	return $constants;
-}
 
 =head1 SYNOPSIS
 
@@ -631,17 +721,6 @@ Jamie McCarthy <jamie@mccarthy.vg>
 
 =cut
 
-sub init_class_global {
-	if (!defined $Global) {
-		if ($ENV{GATEWAY_INTERFACE} && (my $r = Apache->request)) {
-			my $cfg = Apache::ModuleConfig->get($r, 'Slash::Apache');
-			$Global = $cfg->{dxso_global} ||= {};
-		} else {
-			$Global = {};
-		}
-	}
-}
-
 sub get_class_global { $Global }
 
 sub get_constants {
@@ -725,14 +804,7 @@ sub get_constants {
 # Class method.
 
 sub reroll {
-	my($class) = @_;
-	for my $projinst (sort keys %{$Global->{projinst}}) {
-		my $dbobjcache = $Global->{projinst}{$projinst}{dbobjcache};
-		for my $key (sort keys %$dbobjcache) {
-			$dbobjcache->{$key}->check_rollback();
-		}
-		$Global->{projinst}{$projinst}{rollcount}++;
-	}
+	$Global->{rollcount}++;
 }
 
 # obj method in ::DB

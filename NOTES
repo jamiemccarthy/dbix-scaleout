@@ -34,8 +34,102 @@ A dbset has to be specific to a projinst, both because different projects can ha
 
 
 
-`perl Build.PL` leaves passwords in _build/notes, so we must chmod 600 it somehow
 
-creation of dbinst_tuples is broken and silly, leave it as hashref-of-hashrefs instead of (brokenly) transforming to array-of-hashrefs; this makes ACTION_install simpler too
+{
+	# my application code
+	my $logdb = db({ shard => log });
+	my $searchdb = db('MyApp::Search');
+	my $salary = db()->select('salary', 'employees', ['empid = ', \$empid]);
+	my @hit_ids = $logdb->select_col('hitid', 'emplog', ['empid=', \$empid]);
+
+	my $db = db();
+	$db->startTransaction();
+	my $dat1 = $db->select_hr('fookey, fooval', 'bar', ['val < 5 AND fooval IS NOT NULL']);
+	my @fookeys = sort keys %$dat1;
+	my $searches = $searchdb->select_hr('fookey, searchval', 'searches',
+		['fookey IN (', \@fookeys, ')']);
+	my $dat2 = data_crunch($dat1, $searches);
+	for my $fookey (@fookeys) {
+		$db->insert('bar', { fookey => $fookey, fooval => undef, val => $dat2 });
+	}
+	$db->commit();
+}
+
+
+
+project
+
+shard
+
+purpose (r/w)
+
+dbinst
+
+dbh
+
+DBSet does:
+	Roll( project + shard + purpose ) => dbinst
+	connect_cached( dbinst ) => dbh
+
+
+A ::Base object has a fixed project, shard and purpose
+
+A ::Base object HAS-A dbinst/dbh pair.  The pair only changes at two times:
+	1. the first call to $obj->connect(   ) since a reroll()
+		(when it asks the dbset to return a new random        dbinst/dbh)
+	2. the first call to $obj->connect('w') since a reroll()
+		(when it asks the dbset to return a new random writer dbinst/dbh)
+
+A ::Base object is obtained through a call to db($class, { shard => $shard, purpose => 'r', project => $proj })
+	the project defaults to $Global->{default_projinst}
+		(if your web app is written to handle multiple projects running on the same
+		servers/databases, its scripts will probably start with
+		DBIx::ScaleOut::set_project('foo')... if not, they will probably just use
+		the project 'main' and not bother calling set_project)
+		(if you write a special script that must access multiple projects at once,
+		you'll DBIx::ScaleOut::set_project('foo') and then call db() repeatedly
+		to get all your ::Base objects for that project)
+	class defaults to the dxso_classdefault constant for the project
+	shard defaults to the default_shard() for the class
+	purpose defaults to the default_purpose() for the class
+
+There is one ::DBSet object per project.  It's basically just a small container that:
+	reads the project's iinstset "directly" from the initial dbinst
+		and keeps it forever (never rereads)
+	wraps the logic to pick a random dbinst
+	obtains the dbh for that dbinst (usually by calling connect_cached)
+		(I was going to put some caching logic into ::DBSet
+		but I now think connect_cached can handle that for us.)
+		(connect_cached should be passed a { private_dxso_project => $projinst }
+		to prevent reuse of dbh's between projects)
+		(a reroll doesn't clear its dbh cache, but a pid change does)
+
+	
+
+
+rough outline of a few methods follows. "$cache ||=" is used as shorthand indicating
+that the result of a function is cached.
+
+DXSO::db()
+$cache ||= startup( $project )
+	# startup() among many other things initializes the dbset for the project which is in $Global somewhere
+$cache ||=
+	DXSO::Base->new( $shard, $purpose )
+	# asserts that that project has been startup()'d
+	bless and return a mostly-blank hashref: projinst, shard, purpose, rollcount, dbinst, dbpurpose, dbh
+disjoint
+
+DSXO::Base::select()
+undef $dbh if rollcount is off
+$dbh ||= ::DBSet::get_dbh( $dbinst ) # I'm pretty sure this is simply correct: two parts of the code in the same process using the same dbinst should probably share a dbh, or at least I can't think of a reason why not
+
+
+
+
+
+
+rollcount should be "$i$$" where $i is what increments, so either a reroll() or a fork() breaks it
+(test is !=, not <=)
+
 
 

@@ -4,8 +4,8 @@ DBIx::ScaleOut::DBSet - pick and connect to the proper dbinsts
 
 =head1 SYNOPSIS
 
-  You'll probably just 'use DBIx::ScaleOut' and may never need to
-  use this module directly.
+  You'll probably just 'use DBIx::ScaleOut' and will probably never
+  need to use this module directly.
 
 =cut
 
@@ -17,22 +17,24 @@ use warnings;
 #========================================================================
 
 sub new {
-	my($class, $projinst) = @_;
+	my($class, $projinst, $do_ping) = @_;
 
 	# Get a list of all dbinst's referenced by this projinst.
 	die "no projinst" if !$projinst;
 	die "global not defined" if !$DBIx::ScaleOut::global;
 	my $iinstset = $DBIx::ScaleOut::global->{projinst}{$projinst}{iinstset};
+print STDERR "DBSet new iinstset: " . Dumper($iinstset);
+exit 0;
 	die "no iinstset defined for '$projinst'" if !$iinstset;
 	my %dbinst = ( );
 	sub _record_dbinst {
 		my($iinstset, $projinst, $shard, $purpose, $gen, $duples) = @_;
 		for my $duple (@$duples) {
 			my $dbinst = $duple->[1];
-			$dbinst{$dbinst} = 0;
+			$dbinst{$dbinst} = 0; # XXX "will not stay shared"
 		}
 	}
-	foreach_purpose($iinstset, $projinst, \&_record_dbinst);
+#	foreach_purpose($iinstset, $projinst, \&_record_dbinst);
 	my @dbinsts = sort keys %dbinst;
 
 	# If any dbinst's are listed in the purpose that are
@@ -66,6 +68,7 @@ sub new {
 				# Nonfatal error -- hopefully the DB process
 				# just hasn't been started yet.
 				warn "socket file not present '$sock' for '$dbinst' in '$projinst'";
+			}
 			if (!-S _) {
 				# File being the wrong type is odd enough that
 				# it qualifies as a fatal error.
@@ -96,23 +99,23 @@ sub new {
 # dbinst within it.
 # The $projinst param is only there because it's convenient for
 # the callback to have it, e.g. for error reporting.
-sub foreach_purpose {
-	my($shards, $projinst, $callback_func) = @_;
-	return unless $purposes;
-	my @shards = sort keys %$shards;
-	for my $shard (@shards) {
-		my @purposes = sort keys %{$purposes->{$shard}};
-		for my $purpose (@purposes) {
-			my $gens = $purposes->{$shard}{$purpose};
-			for my $gen (0..$#$gens) {
-				my $duples = $purposes->{$shard}{$purpose}[$gen];
-				&$callback_func($purposes, $projinst,
-					$shard, $purpose, $gen,
-					$duples);
-			}
-		}
-	}
-}
+#sub foreach_purpose {
+#	my($shards, $projinst, $callback_func) = @_;
+#	return unless $shards;
+#	my @shards = sort keys %$shards;
+#	for my $shard (@shards) {
+#		my @purposes = sort keys %{$purposes->{$shard}};
+#		for my $purpose (@purposes) {
+#			my $gens = $purposes->{$shard}{$purpose};
+#			for my $gen (0..$#$gens) {
+#				my $duples = $purposes->{$shard}{$purpose}[$gen];
+#				&$callback_func($purposes, $projinst,
+#					$shard, $purpose, $gen,
+#					$duples);
+#			}
+#		}
+#	}
+#}
 
 # This is the main reason for this class:  to scan through a purpose,
 # randomly pick a working (connect-able) dbinst, connect to it,

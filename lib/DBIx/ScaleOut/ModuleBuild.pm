@@ -124,6 +124,7 @@ sub ACTION_install {
 				die "could not chown($uid, $gid, $dbinstfilename): $chown_err";
 			}
 			print "Installing $dbinstfilename\n";
+			# XXX a system("ls -l $dbinstfilename") might be good here
 		}
 
 	}

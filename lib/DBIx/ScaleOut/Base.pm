@@ -20,7 +20,7 @@ sub default_shard	{ 'main' }
 sub default_purpose	{ 'w'    }
 
 sub new {
-	my($class, $shard, $purpose, $opts) = @_;
+	my($class, $shard, $purpose, $options) = @_;
 
 	die "startup() has not been called"
 		if !$DBIx::ScaleOut::Global;
@@ -28,13 +28,13 @@ sub new {
 	my $Global = $DBIx::ScaleOut::Global;
 
 	# If a projinst isn't specified, default to the current projinst.
-	my $projinst = $opts->{projinst} || $Global->{default}{projinst};
+	my $projinst = $options->{projinst} || $Global->{default}{projinst};
 	die "startup() has not been called for projinst '$projinst'"
 		if !$Global->{projinst}{$projinst};
 
 	$shard    ||= default_shard();
 	$purpose  ||= default_purpose();
-	$opts ||= { };
+	$options  ||= { };
 
 	# Set up the new object we'll be returning.  Don't try to connect
 	# to anything yet;  see db().
@@ -44,10 +44,9 @@ sub new {
 		purpose         => $purpose,
 		opts            => $opts,
 		rollcount       => 0,
-		w_inst          => '',
-		w_dbh           => undef,
-		r_inst          => '',
-		r_dbh           => undef,
+		dbinst		=> '',
+		dbh		=> undef,
+		dbpurpose	=> '',
 	}, $class;
 
 	# Don't try yet to open any connections;  they'll be opened as
@@ -58,7 +57,13 @@ sub new {
 sub connect {
 	my($self, $purpose, $force_check) = @_;
 	die "need purpose" unless $purpose && $purpose =~ /^[rw]$/;
+
+	
+
 	my $dbset = $DBIx::ScaleOut::Global->{projinst}{ $self->{projinst} }{dbset};
+	# given dbset (which implies projinst), shard, and purpose,
+	# the dbset can return us a dbinst, and we open our own dbh
+
 }
 
 1;

@@ -1,5 +1,22 @@
 package DBIx::ScaleOut::Driver::mysql;
 
+sub get_dsn {
+	my($dbinst) = @_;
+	my %data = (
+		database => $dbinst->{database},
+	);
+	if ($dbinst->{socket}) {
+		# not really sure if this is correct
+		$data{socket} = $dbinst->{socket};
+	} else {
+		$data{host} = $dbinst->{host};
+		$data{port} = $dbinst->{port};
+	}
+	my $data_str = join ';', map { "$_=$data{$_}" } sort keys %data;
+	$data_str .= "attributes=$data{attributes}" if length $data{attributes};
+	return "DBI:mysql:$data_str";
+}
+
 sub get_dtd {
 	my($class, $dbh, $table) = @_;
 	# regex $table here to prevent SQL injection
