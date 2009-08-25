@@ -1,0 +1,27 @@
+NAME
+    DBIx::ScaleOut - a smart database access layer
+
+SYNOPSIS
+      use DBIx::ScaleOut 'myprojinst';
+
+      $rows = db()->insert('table1', { id => 3, -timecol => 'NOW()' });
+      $timecol = db()->selectOne('timecol', 'table1', "id=" . $db->quote($id));
+      my $db = db();
+      $success = $db->set('user', $uid, { bio => $bio });
+      $hr = $db->get('user', $uid);
+
+    DBIx::ScaleOut::Base is the base class from which your custom classes
+    can inherit; it defines insert(), set(), etc. A constant in
+    dxso_constants specifies which base class to use, and you can set it to
+    your subclass or use the default 'DBIx::ScaleOut::Base'.
+
+    db() is often called without arguments and returns the object for your
+    project's default ::Base class. Another common invocation is
+    db('My::Class') which returns the object for that subclass of ::Base.
+
+    Very pre-alpha, still useless for all practical purposes, work in
+    progress. Do not (yet) use.
+
+AUTHOR
+    Jamie McCarthy <jamie@mccarthy.vg>
+
