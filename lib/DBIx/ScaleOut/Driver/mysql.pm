@@ -1,7 +1,7 @@
 package DBIx::ScaleOut::Driver::mysql;
 
 sub get_dsn {
-	my($dbinst) = @_;
+	my($class, $dbinst) = @_;
 	my %data = (
 		database => $dbinst->{database},
 	);
@@ -13,7 +13,8 @@ sub get_dsn {
 		$data{port} = $dbinst->{port};
 	}
 	my $data_str = join ';', map { "$_=$data{$_}" } sort keys %data;
-	$data_str .= "attributes=$data{attributes}" if length $data{attributes};
+	$data_str .= ";attributes=$data{attributes}" if length $data{attributes};
+use Data::Dumper; print STDERR "data_str: $data_str for dbinst: " . Dumper($dbinst);
 	return "DBI:mysql:$data_str";
 }
 
@@ -27,4 +28,6 @@ sub get_dtd {
 	# somebody has surely written a module related to this, right?
 	return { };
 }
+
+1;
 

@@ -44,6 +44,8 @@ sub default_projinst { 'main' }
 sub db {
 	my($class, $options) = @_;
 
+use Data::Dumper; $Data::Dumper::Sortkeys = 1;
+
 	startup(default_projinst()) if !$Global;
 
 	$class ||= dat('dxso_classdefault') || 'DBIx::ScaleOut::Base';
@@ -108,6 +110,7 @@ sub startup_stage0 {
 
 	my $driver_class = startup_stage0_loaddriver($initial_dbinst->{driver});
 
+print STDERR "stage0 init, class: " . Dumper($initial_dbinst, $driver_class);
 	startup_stage0_setdbinstdsn($initial_dbinst, $driver_class);
 
 	$Global->{default_projinst} = $projinst;
@@ -116,10 +119,13 @@ sub startup_stage0 {
 		pid             => $$,
 		initial_dbinst  => $initial_dbinst,
 	};
+print STDERR "stage0 Global: " . Dumper($Global);
 }
 
 sub startup_stage0_setdbinstdsn {
 	my($dbinst, $driver_class) = @_;
+print STDERR "set dbinst: " . Dumper($dbinst);
+print STDERR "dsn would be: " . Dumper($driver_class->get_dsn($dbinst));
 	$dbinst->{dsn} = $driver_class->get_dsn($dbinst);
 }
 
@@ -134,8 +140,6 @@ sub startup_stage0_initglobal {
 	}
 }
 
-{
-my %classes;
 sub startup_stage0_loadclass {
 	my($class) = @_;
 
@@ -144,13 +148,13 @@ sub startup_stage0_loadclass {
 	# there's an error.
 	undef $@;
 
-	if ($Global->{classref}{$class}) {
+	if ($Global->{loadedclass}{$class}) {
 		# The eval to load this class was called earlier.  If it
 		# succeeded, this cached value will be 1;  otherwise it
 		# will be 'NA'.  Note that in this case, we return false
 		# indicating error without setting $@ to what the error
 		# was.
-		return($Global->{classref}{$class} ne 'NA');
+		return($Global->{loadedclass}{$class} ne 'NA');
 	}
 
 	# To avoid calling eval unless necessary (eval'ing a string is slow),
@@ -162,14 +166,13 @@ sub startup_stage0_loadclass {
 	if ($@) {
 		# Our attempt to load the class failed.  Return false,
 		# and in this case, $@ tells what the error was.
-		$Global->{classref}{$class} = 'NA';
+		$Global->{loadedclass}{$class} = 'NA';
 		return 0;
 	}
 	# We loaded the class successfully.  Set the cache to 1 to
 	# short-circuit the next time loadClass is called, and
 	# return true.
-	return $Global->{classref}{$class} = 1;
-}
+	return $Global->{loadedclass}{$class} = 1;
 }
 
 sub startup_stage0_loaddriver {
@@ -182,18 +185,16 @@ sub startup_stage0_loaddriver {
 	return $driver_class;
 }
 
-{
-my %dbinsts;
 sub startup_stage0_loaddbinst {
 	my($dbinstname) = @_;
 
 	my $class = "DBIx::ScaleOut::Access::$dbinstname";
 
-	if ($dbinsts{$dbinstname}) {
-		if ($dbinsts{$dbinstname} eq 'NA') {
+	if ($Global->{loadeddbinst}{$dbinstname}) {
+		if ($Global->{loadeddbinst}{$dbinstname} eq 'NA') {
 			return 0; # previous failure
 		}
-		return $dbinsts{$dbinstname}; # previous success
+		return $Global->{loadeddbinst}{$dbinstname}; # previous success
 	}
 
 	return 0 if ! startup_stage0_loadclass($class);
@@ -205,12 +206,11 @@ sub startup_stage0_loaddbinst {
 	}
 
 	if (defined $dbinst) {
-		return $dbinsts{$dbinstname} = $dbinst;
+		return $Global->{loadeddbinst}{$dbinstname} = $dbinst;
 	} else {
-		$dbinsts{$dbinstname} = 'NA';
+		$Global->{loadeddbinst}{$dbinstname} = 'NA';
 		return 0;
 	}
-}
 }
 
 # startup_stage1: connect to writer DB, retrieve constants table,
@@ -232,7 +232,7 @@ sub startup_stage1 {
 	# be a list and the connection attempt should be in a loop.  This is
 	# the main place where "initial=1" would get used.
 
-	my $initial_dbinst = $gp->{dbinst}{$projinst};
+	my $initial_dbinst = $gp->{initial_dbinst};
 
 	my $initial_dbh = $class->startup_stage1_connect($initial_dbinst);
 	die "startup_stage1 cannot connect" if !$initial_dbh;
@@ -263,6 +263,7 @@ sub startup_ready {
 
 sub startup_stage1_connect {
 	my($class, $dbinst) = @_;
+print STDERR 'connecting to: ' . Dumper($dbinst);
 	return DBI->connect_cached($dbinst->{dsn}, $dbinst->{dbuser}, $dbinst->{password});
 }
 
