@@ -45,7 +45,7 @@ sub process_pm_files {
 	# (3) override ACTION_install to copy these files after the
 	# default install, setting chmod/chown;
 	# (4) do_edit() will want to write a notes file (or maybe a
-	# while _build directory?); instead of calling ACTION_install,
+	# whole _build directory?); instead of calling ACTION_install,
 	# just manually do the copy in step (3); rm the notes/_build.
 
 	$self->SUPER::process_pm_files(@_);
